@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Experiment File
+*.ipynb
+
+# Local files
+.env 
+artifacts/
+
+# Design Docs
+docs/superpowers/
+openspec/
+
+# Development skills
+.github/prompts/opsx*
+.github/skills/openspec*
+.cline*/
+.github/copilot-instructions.md
+.github/instructions/mermaid.instructions.md

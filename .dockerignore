@@ -1,0 +1,30 @@
+# Build / cache
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.benchmarks/
+
+# IDE / local tooling
+.cline/
+.clinerules/
+.github/
+.python-version
+
+# Secrets / environment
+.env
+
+# Generated artifacts / runtime data
+artifacts/
+
+# Tests / notebooks / docs not needed at runtime
+tests/
+test_end_point.ipynb
+*.ipynb
+docs/
+
+# Git / project metadata
+.git/
+.gitignore
+README.md

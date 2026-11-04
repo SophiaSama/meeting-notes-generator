@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "meeting-notes-helper": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/path/to/meeting-notes-helper",
+        "python",
+        "mcp_server.py"
+      ]
+    }
+  }
+}

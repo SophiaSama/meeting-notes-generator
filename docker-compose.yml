@@ -1,0 +1,31 @@
+services:
+  meeting-notes-helper:
+    build: .
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    volumes:
+      - ./artifacts:/app/artifacts
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  # Run the MCP server with SSE transport on http://localhost:8000/sse
+  # Start with: docker compose --profile mcp up
+  mcp:
+    build: .
+    profiles:
+      - mcp
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./artifacts:/app/artifacts
+    restart: unless-stopped
+    command: ["uv", "run", "python", "mcp_server.py", "--sse"]
