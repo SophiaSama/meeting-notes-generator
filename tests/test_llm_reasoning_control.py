@@ -268,7 +268,7 @@ def test_unrelated_bad_request_is_not_remembered(fake_openai):
 
 def test_test_connection_passes_effort(fake_openai):
     result = LLMService().test_connection(
-        "http://localhost:4000", "k", "gpt-4o", "u1", "u2", "app", "minimal"
+        "http://localhost:4000", "k", "gpt-4o", "minimal"
     )
     assert result.startswith("✅")
     assert fake_openai.requests[0]["extra_body"] == {"reasoning": {"effort": "minimal"}}

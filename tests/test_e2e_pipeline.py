@@ -863,3 +863,70 @@ def test_map_reduce_survives_failing_segment_and_reports_recovery(monkeypatch, p
     assert "Notes despite segment failure." in notes_text
     assert "LLM output-limit recovery" in notes_text
     assert "raw transcript text" in notes_text
+
+
+@pytest.mark.e2e
+def test_pipeline_executes_visual_and_audio_branches_in_parallel(
+    monkeypatch, pipeline, synthetic_video
+):
+    import threading
+
+    branch_barrier = threading.Barrier(2, timeout=3.0)
+    orig_extract = pipeline.video_service.extract_frames
+    orig_transcribe = pipeline.video_service.transcribe_video_chunked
+
+    def synced_extract(*args, **kwargs):
+        res = orig_extract(*args, **kwargs)
+        branch_barrier.wait()
+        return res
+
+    def synced_transcribe(*args, **kwargs):
+        branch_barrier.wait()
+        return orig_transcribe(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline.video_service, "extract_frames", synced_extract)
+    monkeypatch.setattr(pipeline.video_service, "transcribe_video_chunked", synced_transcribe)
+
+    thumbnails, notes_text, html_notes, html_path = _run(pipeline, synthetic_video)
+    assert len(thumbnails) == 2
+    assert "Executive Summary" in notes_text
+    assert Path(html_path).exists()
+
+
+@pytest.mark.e2e
+def test_document_model_ocr_processes_frames_in_parallel_and_preserves_contextvar(
+    monkeypatch, pipeline, synthetic_video
+):
+    import threading
+    from meeting_notes.llm import LLMService
+
+    monkeypatch.setenv("LLM_OCR_MODEL", "mistral-document-ai-2505")
+    ocr_barrier = threading.Barrier(2, timeout=3.0)
+    observed_efforts: list[str | None] = []
+    lock = threading.Lock()
+    notes_reply = pipeline.llm_service.reply
+
+    def fake_call_llm(messages, **kwargs):
+        prompt = (kwargs.get("system_prompt") or "").lower()
+        if "ocr extraction assistant" in prompt:
+            with lock:
+                observed_efforts.append(LLMService.current_reasoning_effort())
+            ocr_barrier.wait()
+            return "Parallel OCR text"
+        return notes_reply
+
+    pipeline.llm_service.call_llm = fake_call_llm
+
+    pipeline.run_pipeline(
+        str(synthetic_video),
+        PROXY_ARGS["base_url"],
+        PROXY_ARGS["api_key"],
+        PROXY_ARGS["model"],
+        interval_seconds=2,
+        max_frames=8,
+        notes_style="Executive Summary",
+        output_language="English",
+        reasoning_effort="low",
+    )
+
+    assert observed_efforts == ["low", "low"]

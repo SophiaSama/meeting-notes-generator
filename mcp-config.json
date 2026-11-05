@@ -5,7 +5,7 @@
       "args": [
         "run",
         "--directory",
-        "/path/to/meeting-notes-helper",
+        "/Users/ruiping/projects/meeting-notes-generator",
         "python",
         "mcp_server.py"
       ]

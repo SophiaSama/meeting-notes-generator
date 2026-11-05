@@ -2,11 +2,14 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from datetime import datetime
 from pathlib import Path
 
@@ -22,9 +25,20 @@ class VideoService:
     """Video frame extraction, metadata, and chunked transcription."""
 
     DEFAULT_CHUNK_OVERLAP_SECONDS = 10
+    DEFAULT_TRANSCRIBE_MAX_WORKERS = 4
 
     def __init__(self, llm_service: LLMService):
         self.llm_service = llm_service
+
+    @classmethod
+    def _transcribe_max_workers(cls) -> int:
+        raw = os.getenv("LLM_TRANSCRIBE_MAX_WORKERS", "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+        return cls.DEFAULT_TRANSCRIBE_MAX_WORKERS
 
     @staticmethod
     def format_duration(seconds: float) -> str:
@@ -232,8 +246,8 @@ class VideoService:
         try:
             with tempfile.TemporaryDirectory() as td:
                 chunk_window_manifest: list[dict] = []
-                previous_text_part = ""
-                for i, window in enumerate(chunk_windows, start=1):
+
+                def _process_chunk(i: int, window: dict) -> tuple[int, str, dict]:
                     chunk = Path(td) / f"audio_chunk_{i:03d}.mp3"
                     chunk_duration = max(0.1, window["end_seconds"] - window["start_seconds"])
                     split_cmd = [
@@ -271,6 +285,27 @@ class VideoService:
                             file=af,
                         )
                     text_part = tr if isinstance(tr, str) else getattr(tr, "text", str(tr))
+                    return i, text_part, window
+
+                max_workers = min(self._transcribe_max_workers(), max(1, len(chunk_windows)))
+                raw_results: dict[int, tuple[str, dict]] = {}
+                if max_workers <= 1 or len(chunk_windows) <= 1:
+                    for i, window in enumerate(chunk_windows, start=1):
+                        _, text_part, win = _process_chunk(i, window)
+                        raw_results[i] = (text_part, win)
+                else:
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = {
+                            executor.submit(copy_context().run, _process_chunk, i, window): i
+                            for i, window in enumerate(chunk_windows, start=1)
+                        }
+                        for future in as_completed(futures):
+                            i, text_part, win = future.result()
+                            raw_results[i] = (text_part, win)
+
+                previous_text_part = ""
+                for i in sorted(raw_results):
+                    text_part, window = raw_results[i]
                     merged_text_part = text_part
                     if previous_text_part:
                         merged_text_part = self._trim_overlapping_prefix(previous_text_part, text_part)

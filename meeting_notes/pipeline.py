@@ -7,6 +7,8 @@ import shutil
 import tempfile
 import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from html import escape
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +46,17 @@ class PipelineService:
     DEFAULT_LENGTH_RETRY_MAX_TOKENS = 32_000
     DEFAULT_FALLBACK_MODEL = "gpt-4o"
     DEFAULT_FALLBACK_MAX_TOKENS = 16_000
+    DEFAULT_OCR_MAX_WORKERS = 4
+
+    @classmethod
+    def _ocr_max_workers(cls) -> int:
+        raw = os.getenv("LLM_OCR_MAX_WORKERS", "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+        return cls.DEFAULT_OCR_MAX_WORKERS
 
     def __init__(
         self,
@@ -1300,32 +1313,41 @@ class PipelineService:
         extracted_count = 0
         failures = 0
         last_error = ""
-        for i, frame in enumerate(frames, start=1):
+        for frame in frames:
             frame["ocr_text"] = ""
             frame["ocr_keywords"] = []
+
+        def _ocr_single(i: int, frame: dict) -> tuple[int, str | None, Exception | None]:
             try:
-                text = self._ocr_with_document_model(
+                res_text = self._ocr_with_document_model(
                     frame,
                     base_url=base_url,
                     api_key=api_key,
                     ocr_model=ocr_model,
                 )
-                if text:
-                    logger.debug(
-                        "Document model OCR extracted text from frame %d/%d (%s): %s",
-                        i,
-                        len(frames),
-                        frame.get("time_str", "N/A"),
-                        text[:80] + ("..." if len(text) > 80 else ""),
-                    )
-                else:
-                    logger.debug(
-                        "Document model OCR returned empty/no text for frame %d/%d (%s)",
-                        i,
-                        len(frames),
-                        frame.get("time_str", "N/A"),
-                    )
+                return i, res_text, None
             except Exception as exc:
+                return i, None, exc
+
+        max_workers = min(self._ocr_max_workers(), max(1, len(frames)))
+        ocr_outcomes: dict[int, tuple[str | None, Exception | None]] = {}
+        if max_workers <= 1 or len(frames) <= 1:
+            for i, frame in enumerate(frames, start=1):
+                _, res_text, exc = _ocr_single(i, frame)
+                ocr_outcomes[i] = (res_text, exc)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(copy_context().run, _ocr_single, i, frame): i
+                    for i, frame in enumerate(frames, start=1)
+                }
+                for future in as_completed(futures):
+                    i, res_text, exc = future.result()
+                    ocr_outcomes[i] = (res_text, exc)
+
+        for i, frame in enumerate(frames, start=1):
+            text, exc = ocr_outcomes[i]
+            if exc is not None:
                 failures += 1
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning(
@@ -1338,6 +1360,23 @@ class PipelineService:
                     exc,
                 )
                 continue
+
+            text = text or ""
+            if text:
+                logger.debug(
+                    "Document model OCR extracted text from frame %d/%d (%s): %s",
+                    i,
+                    len(frames),
+                    frame.get("time_str", "N/A"),
+                    text[:80] + ("..." if len(text) > 80 else ""),
+                )
+            else:
+                logger.debug(
+                    "Document model OCR returned empty/no text for frame %d/%d (%s)",
+                    i,
+                    len(frames),
+                    frame.get("time_str", "N/A"),
+                )
 
             frame["ocr_text"] = text
             frame["ocr_keywords"] = list(self._extract_keywords(text)) if text else []
@@ -1507,36 +1546,51 @@ class PipelineService:
             progress(0.05, desc="Reading video metadata...")
             info = self.video_service.get_video_info(video_path)
 
-            progress(0.20, desc=f"Extracting frames every {interval_seconds}s...")
-            frames = self.video_service.extract_frames(video_path, int(interval_seconds), int(max_frames))
-            ocr_meta = self._enrich_frames_with_document_model_ocr(
-                frames,
-                base_url=base_url,
-                api_key=api_key,
+            progress(
+                0.20,
+                desc=f"Extracting frames ({interval_seconds}s) & transcribing audio in parallel...",
             )
-            if ocr_meta.get("engine") != "none" and (
-                (not ocr_meta.get("available", False)) or ocr_meta.get("frames_with_text", 0) == 0
-            ):
-                fallback_meta = self.video_service.enrich_frames_with_ocr(frames)
-                if fallback_meta.get("available", False):
-                    ocr_meta = fallback_meta
-                elif not ocr_meta.get("available", False):
-                    reason_parts = [ocr_meta.get("reason", ""), fallback_meta.get("reason", "")]
-                    merged_reason = "; ".join(part for part in reason_parts if part)
-                    ocr_meta = {"available": False, "engine": "none", "reason": merged_reason}
 
-            thumbnails = [f["pil_image"] for f in frames]
+            def _visual_branch() -> tuple[list[dict], dict, list]:
+                extracted_frames = self.video_service.extract_frames(
+                    video_path, int(interval_seconds), int(max_frames)
+                )
+                meta = self._enrich_frames_with_document_model_ocr(
+                    extracted_frames,
+                    base_url=base_url,
+                    api_key=api_key,
+                )
+                if meta.get("engine") != "none" and (
+                    (not meta.get("available", False)) or meta.get("frames_with_text", 0) == 0
+                ):
+                    fallback_meta = self.video_service.enrich_frames_with_ocr(extracted_frames)
+                    if fallback_meta.get("available", False):
+                        meta = fallback_meta
+                    elif not meta.get("available", False):
+                        reason_parts = [meta.get("reason", ""), fallback_meta.get("reason", "")]
+                        merged_reason = "; ".join(part for part in reason_parts if part)
+                        meta = {"available": False, "engine": "none", "reason": merged_reason}
 
-            progress(0.45, desc="Transcribing full video in chunks...")
-            transcribe_model = os.getenv("LLM_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
-            tx = self.video_service.transcribe_video_chunked(
-                video_path,
-                base_url=os.getenv("LLM_TRANSCRIBE_BASE_URL", "").strip() or base_url,
-                api_key=os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip() or api_key,
-                transcribe_model=transcribe_model,
-                chunk_seconds=90,
-                chunk_overlap_seconds=10,
-            )
+                thumbs = [f["pil_image"] for f in extracted_frames]
+                return extracted_frames, meta, thumbs
+
+            def _audio_branch() -> dict:
+                transcribe_model = os.getenv("LLM_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+                return self.video_service.transcribe_video_chunked(
+                    video_path,
+                    base_url=os.getenv("LLM_TRANSCRIBE_BASE_URL", "").strip() or base_url,
+                    api_key=os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip() or api_key,
+                    transcribe_model=transcribe_model,
+                    chunk_seconds=90,
+                    chunk_overlap_seconds=10,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as branch_executor:
+                visual_future = branch_executor.submit(copy_context().run, _visual_branch)
+                audio_future = branch_executor.submit(copy_context().run, _audio_branch)
+                frames, ocr_meta, thumbnails = visual_future.result()
+                tx = audio_future.result()
+
             saved_transcript = tx["transcript_text"]
             coverage = tx["manifest"].get("coverage_ratio", 0.0)
 
