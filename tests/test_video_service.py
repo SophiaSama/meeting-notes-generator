@@ -14,7 +14,7 @@ import types
 
 import pytest
 
-from meeting_notes.video import VideoService
+from meeting_notes.video import NoAudioStreamError, VideoService
 
 
 def test_resolve_ffmpeg_prefers_system_binary(monkeypatch: pytest.MonkeyPatch):
@@ -178,3 +178,58 @@ def test_transcribe_video_chunked_runs_chunks_in_parallel_and_preserves_order(
     assert "[Chunk 2]\nSecond chunk unique text." in tx["transcript_text"]
     assert "[Chunk 3]\nThird chunk conclusion." in tx["transcript_text"]
     assert [w["chunk_index"] for w in tx["manifest"]["chunk_windows"]] == [1, 2, 3]
+
+
+def test_stderr_indicates_no_audio_detects_video_only_input():
+    stderr = (
+        "Output #0, mp3, to 'audio_chunk_001.mp3':\n"
+        "[out#0/mp3 @ 0x136105d80] Output file does not contain any stream\n"
+        "Error opening output files: Invalid argument\n"
+    )
+    assert VideoService._stderr_indicates_no_audio(stderr)
+    assert not VideoService._stderr_indicates_no_audio("Invalid data found when processing input")
+    assert not VideoService._stderr_indicates_no_audio("")
+
+
+def test_transcribe_video_chunked_raises_clear_error_for_video_without_audio(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Regression: macOS screen recordings without audio crashed with a raw ffmpeg dump."""
+    import subprocess
+
+    from meeting_notes.llm import LLMService
+
+    ffmpeg_bin = VideoService.resolve_ffmpeg_binary()
+    video_file = tmp_path / "silent.mp4"
+    gen = subprocess.run(
+        [
+            ffmpeg_bin, "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=10",
+            "-pix_fmt", "yuv420p", str(video_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if gen.returncode != 0:
+        pytest.skip(f"ffmpeg cannot synthesize a test video: {gen.stderr[-200:]}")
+
+    monkeypatch.chdir(tmp_path)
+    llm = LLMService()
+    vs = VideoService(llm)
+
+    class FakeClient:
+        class audio:
+            class transcriptions:
+                @staticmethod
+                def create(**kwargs):
+                    raise AssertionError("transcription must not be attempted without audio")
+
+    monkeypatch.setattr(llm, "build_client", lambda base_url, api_key: FakeClient())
+
+    with pytest.raises(NoAudioStreamError, match="No audio detected"):
+        vs.transcribe_video_chunked(
+            str(video_file),
+            base_url="http://localhost:4000",
+            api_key="k",
+            transcribe_model="gpt-4o-transcribe",
+        )

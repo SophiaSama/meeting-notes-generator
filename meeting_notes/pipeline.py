@@ -17,7 +17,7 @@ import gradio as gr
 
 from .llm import LLMOutputLimitError, LLMService
 from .notes import NotesService
-from .video import VideoService
+from .video import NoAudioStreamError, VideoService
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,6 @@ class PipelineService:
     DEFAULT_REASONING_FINAL_MAX_TOKENS = 24_000
     DEFAULT_REASONING_QA_MAX_TOKENS = 16_000
     DEFAULT_LENGTH_RETRY_MAX_TOKENS = 32_000
-    DEFAULT_FALLBACK_MODEL = "gpt-4o"
     DEFAULT_FALLBACK_MAX_TOKENS = 16_000
     DEFAULT_OCR_MAX_WORKERS = 4
 
@@ -520,12 +519,10 @@ class PipelineService:
     def _fallback_model(cls) -> str:
         """Model used once when the primary model still exhausts its budget.
 
-        Unset -> ``gpt-4o``; set to an empty string to disable the fallback.
+        Read from ``LLM_NOTES_FALLBACK_MODEL`` (e.g. in ``.env``); there is no
+        hardcoded default. Unset or empty disables the fallback.
         """
-        raw_value = os.getenv("LLM_NOTES_FALLBACK_MODEL")
-        if raw_value is None:
-            return cls.DEFAULT_FALLBACK_MODEL
-        return raw_value.strip()
+        return os.getenv("LLM_NOTES_FALLBACK_MODEL", "").strip()
 
     @classmethod
     def _fallback_max_tokens(cls) -> int:
@@ -1983,6 +1980,9 @@ class PipelineService:
             )
         except gr.Error:
             raise
+        except NoAudioStreamError as e:
+            # Surface as a Gradio pop-up instead of a raw ffmpeg dump in the notes pane.
+            raise gr.Error(NoAudioStreamError.USER_MESSAGE, title="No audio detected") from e
         except Exception as e:
             msg = (
                 "Generation failed. You can upload again and retry.\n\n"

@@ -329,6 +329,8 @@ def test_dynamic_model_and_reasoning_effort_switching_and_session_isolation(pipe
 
 def test_reasoning_model_output_limit_retry_and_fallback_and_cot_stripping(monkeypatch):
     ctx = _sample_meeting_context()
+    fallback_model = "fallback-from-env"
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", fallback_model)
 
     # Wire a real LLMService with a fake OpenAI client to verify both:
     # 1. reasoning_content (chain-of-thought) is stripped and never leaked into chat reply
@@ -428,7 +430,7 @@ def test_reasoning_model_output_limit_retry_and_fallback_and_cot_stripping(monke
     assert len(requests_seen) == 3
     assert requests_seen[0]["model"] == "Kimi-K2.6"
     assert requests_seen[1]["model"] == "Kimi-K2.6"
-    assert requests_seen[2]["model"] == PipelineService.DEFAULT_FALLBACK_MODEL
+    assert requests_seen[2]["model"] == fallback_model
 
 
 def test_query_meeting_safe_surfaces_friendly_inline_error_and_preserves_context(pipeline):
@@ -465,3 +467,11 @@ def test_query_meeting_safe_surfaces_friendly_inline_error_and_preserves_context
     assert updated_history[3] == {"role": "assistant", "content": reply}
     # Meeting context and generated notes remain untouched
     assert ctx["markdown_notes"] == original_notes
+
+
+def test_fallback_model_comes_only_from_env(monkeypatch):
+    """No hardcoded fallback: the value comes from LLM_NOTES_FALLBACK_MODEL (.env)."""
+    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    assert PipelineService._fallback_model() == ""
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "  gemini-3.5-flash  ")
+    assert PipelineService._fallback_model() == "gemini-3.5-flash"

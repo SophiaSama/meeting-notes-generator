@@ -685,7 +685,7 @@ def test_length_retry_budget_is_capped(monkeypatch, pipeline):
 
 
 def test_fallback_model_used_after_primary_exhausts_budget(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
     calls: list[dict] = []
 
     def fake_call(messages, **kwargs):
@@ -712,7 +712,7 @@ def test_fallback_model_used_after_primary_exhausts_budget(monkeypatch, pipeline
 
 
 def test_fallback_model_not_used_for_non_length_errors(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
     models: list[str] = []
 
     def fail(messages, **kwargs):
@@ -734,7 +734,7 @@ def test_fallback_model_not_used_for_non_length_errors(monkeypatch, pipeline):
 
 
 def test_fallback_failure_reraises_original_length_error(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
 
     def fake_call(messages, **kwargs):
         if kwargs["model"] == "gpt-4o":
@@ -762,7 +762,7 @@ def _segment_call_kwargs() -> dict:
 
 
 def test_segment_is_split_when_primary_keeps_hitting_limit(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
     calls: list[dict] = []
 
     def fake_call(messages, **kwargs):
@@ -794,7 +794,7 @@ def test_segment_is_split_when_primary_keeps_hitting_limit(monkeypatch, pipeline
 
 
 def test_segment_falls_back_to_raw_text_when_everything_fails(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
     models: list[str] = []
 
     def always_limited(messages, **kwargs):
@@ -930,3 +930,32 @@ def test_document_model_ocr_processes_frames_in_parallel_and_preserves_contextva
     )
 
     assert observed_efforts == ["low", "low"]
+
+
+@pytest.mark.e2e
+def test_run_pipeline_safe_pops_up_no_audio_detected_error(pipeline, synthetic_video):
+    """A video without an audio track must raise a gr.Error pop-up, not a raw ffmpeg dump."""
+    import gradio as gr
+
+    from meeting_notes.video import NoAudioStreamError
+
+    def no_audio(*args, **kwargs):
+        raise NoAudioStreamError(NoAudioStreamError.USER_MESSAGE)
+
+    pipeline.video_service.transcribe_video_chunked = no_audio
+
+    with pytest.raises(gr.Error) as exc_info:
+        pipeline.run_pipeline_safe(
+            str(synthetic_video),
+            PROXY_ARGS["base_url"],
+            PROXY_ARGS["api_key"],
+            PROXY_ARGS["model"],
+            interval_seconds=30,
+            max_frames=8,
+            notes_style="Executive Summary",
+            output_language="English",
+            return_context=True,
+        )
+
+    assert exc_info.value.title == "No audio detected"
+    assert str(exc_info.value.message).startswith("No audio detected")

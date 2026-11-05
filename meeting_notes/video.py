@@ -21,6 +21,15 @@ from .llm import LLMService
 logger = logging.getLogger(__name__)
 
 
+class NoAudioStreamError(RuntimeError):
+    """Raised when the input video has no audio stream to transcribe."""
+
+    USER_MESSAGE = (
+        "No audio detected in the uploaded video. Please upload a video with "
+        "audio, or upload a transcript file instead."
+    )
+
+
 class VideoService:
     """Video frame extraction, metadata, and chunked transcription."""
 
@@ -270,6 +279,8 @@ class VideoService:
                     ]
                     result = subprocess.run(split_cmd, capture_output=True, text=True)
                     if result.returncode != 0:
+                        if self._stderr_indicates_no_audio(result.stderr):
+                            raise NoAudioStreamError(NoAudioStreamError.USER_MESSAGE)
                         stderr_tail = result.stderr[-800:] if result.stderr else "unknown error"
                         raise RuntimeError(
                             f"ffmpeg split failed for chunk {i} "
@@ -373,6 +384,24 @@ class VideoService:
                     "manifest": fallback_manifest,
                 }
             raise
+
+    _NO_AUDIO_STDERR_MARKERS = (
+        "does not contain any stream",
+        "matches no streams",
+    )
+
+    @classmethod
+    def _stderr_indicates_no_audio(cls, stderr: str | None) -> bool:
+        """Return True when ffmpeg failed because the input has no audio stream.
+
+        With ``-vn`` and an audio-only output (mp3), ffmpeg reports
+        "Output file does not contain any stream" for video-only inputs such as
+        macOS screen recordings captured without microphone/system audio.
+        """
+        if not stderr:
+            return False
+        lowered = stderr.lower()
+        return any(marker in lowered for marker in cls._NO_AUDIO_STDERR_MARKERS)
 
     @staticmethod
     def _plan_transcript_chunk_windows(
