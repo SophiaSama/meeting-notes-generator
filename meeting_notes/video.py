@@ -21,6 +21,19 @@ from .llm import LLMService
 logger = logging.getLogger(__name__)
 
 
+class NoAudioStreamError(RuntimeError):
+    """Raised when the input video has no audio stream to transcribe."""
+
+    USER_MESSAGE = (
+        "No audio detected in the uploaded video. Please upload a video with "
+        "audio, or upload a transcript file instead."
+    )
+
+
+class TranscriptionConfigError(RuntimeError):
+    """Raised when audio transcription is misconfigured."""
+
+
 class VideoService:
     """Video frame extraction, metadata, and chunked transcription."""
 
@@ -29,6 +42,97 @@ class VideoService:
 
     def __init__(self, llm_service: LLMService):
         self.llm_service = llm_service
+
+    @staticmethod
+    def is_gemini_transcribe_model(model: str | None) -> bool:
+        if not model:
+            return False
+        normalized = model.strip().lower()
+        if normalized.startswith("models/"):
+            normalized = normalized[len("models/"):]
+        return normalized.startswith("gemini")
+
+    @classmethod
+    def validate_transcription_config(
+        cls,
+        transcribe_model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        """Validate transcription configuration before processing audio.
+
+        If a non-Gemini model is configured, a dedicated base_url (or LLM_TRANSCRIBE_BASE_URL)
+        must be configured.
+        """
+        model = (
+            (transcribe_model or "").strip()
+            or os.getenv("LLM_TRANSCRIBE_MODEL", "").strip()
+            or "gemini-3.5-transcribe"
+        )
+        if not cls.is_gemini_transcribe_model(model):
+            effective_base_url = (
+                (base_url or "").strip()
+                or os.getenv("LLM_TRANSCRIBE_BASE_URL", "").strip()
+            )
+            if not effective_base_url:
+                raise TranscriptionConfigError(
+                    f"Audio transcription model '{model}' is not a native Gemini model, "
+                    "and LLM_TRANSCRIBE_BASE_URL is not configured. "
+                    "Please set LLM_TRANSCRIBE_BASE_URL (and LLM_TRANSCRIBE_API_KEY if needed) in .env "
+                    "to match your transcription provider, or switch LLM_TRANSCRIBE_MODEL to 'gemini-3.5-transcribe'."
+                )
+
+    def build_gemini_client(self, api_key: str | None = None):
+        """Construct a Google GenAI Client for native Gemini transcription."""
+        from google import genai
+
+        effective_key = (
+            (api_key or "").strip()
+            or os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip()
+            or os.getenv("GEMINI_API_KEY", "").strip()
+            or os.getenv("GOOGLE_API_KEY", "").strip()
+        )
+        if effective_key:
+            client = genai.Client(api_key=effective_key)
+        else:
+            client = genai.Client()
+
+        if hasattr(client, "interactions") and hasattr(client.interactions, "create"):
+            orig_create = client.interactions.create
+
+            def _safe_create(*args, **kwargs):
+                call_kwargs = dict(kwargs)
+                had_transcription_config = "transcription_config" in call_kwargs
+                tc = call_kwargs.pop("transcription_config", None)
+                if had_transcription_config:
+                    gen_cfg = call_kwargs.get("generation_config")
+                    if gen_cfg is None:
+                        call_kwargs["generation_config"] = {"transcription_config": tc}
+                    elif isinstance(gen_cfg, dict) and "transcription_config" not in gen_cfg:
+                        call_kwargs["generation_config"] = {**gen_cfg, "transcription_config": tc}
+                if "input" in call_kwargs and isinstance(call_kwargs["input"], list):
+                    normalized_input = []
+                    for item in call_kwargs["input"]:
+                        if hasattr(item, "uri") and getattr(item, "uri", None):
+                            mime = getattr(item, "mime_type", None) or "audio/mp3"
+                            normalized_input.append(
+                                {"type": "audio", "uri": item.uri, "mime_type": mime}
+                            )
+                        else:
+                            normalized_input.append(item)
+                    call_kwargs["input"] = normalized_input
+                try:
+                    return orig_create(*args, **call_kwargs)
+                except TypeError as err:
+                    if (
+                        re.search(r"keyword argument.*generation_config", str(err))
+                        and had_transcription_config
+                    ):
+                        return orig_create(*args, **kwargs)
+                    raise
+
+            client.interactions.create = _safe_create
+
+        return client
 
     @classmethod
     def _transcribe_max_workers(cls) -> int:
@@ -196,12 +300,24 @@ class VideoService:
         self,
         video_path: str,
         *,
-        base_url: str,
-        api_key: str,
-        transcribe_model: str,
+        base_url: str = "",
+        api_key: str = "",
+        transcribe_model: str = "",
         chunk_seconds: int = 90,
         chunk_overlap_seconds: int = DEFAULT_CHUNK_OVERLAP_SECONDS,
+        transcription_config: dict | None = None,
     ) -> dict:
+        transcribe_model = (
+            transcribe_model.strip()
+            if transcribe_model
+            else os.getenv("LLM_TRANSCRIBE_MODEL", "").strip() or "gemini-3.5-transcribe"
+        )
+        self.validate_transcription_config(transcribe_model, base_url)
+        is_gemini = self.is_gemini_transcribe_model(transcribe_model)
+
+        if transcription_config is None:
+            transcription_config = {"mode": "smart"}
+
         info = self.get_video_info(video_path)
         duration_seconds = float(info["duration"])
         chunk_windows = self._plan_transcript_chunk_windows(
@@ -224,7 +340,28 @@ class VideoService:
 
         ffmpeg_bin = self.resolve_ffmpeg_binary()
 
-        client = self.llm_service.build_client(base_url, api_key)
+        if is_gemini:
+            # If a generic api_key was passed in (e.g. from chat LLM settings),
+            # prefer dedicated transcription/Gemini env keys if present.
+            gemini_key = (
+                os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip()
+                or os.getenv("GEMINI_API_KEY", "").strip()
+                or os.getenv("GOOGLE_API_KEY", "").strip()
+                or (api_key or "").strip()
+            )
+            client = self.build_gemini_client(api_key=gemini_key)
+        else:
+            effective_base_url = (
+                (base_url or "").strip()
+                or os.getenv("LLM_TRANSCRIBE_BASE_URL", "").strip()
+            )
+            effective_api_key = (
+                (api_key or "").strip()
+                or os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip()
+                or os.getenv("LLM_API_KEY", "").strip()
+                or os.getenv("OPENAI_API_KEY", "").strip()
+            )
+            client = self.llm_service.build_client(effective_base_url, effective_api_key)
 
         transcript_parts: list[str] = []
         generated_chunk_files: list[str] = []
@@ -270,6 +407,8 @@ class VideoService:
                     ]
                     result = subprocess.run(split_cmd, capture_output=True, text=True)
                     if result.returncode != 0:
+                        if self._stderr_indicates_no_audio(result.stderr):
+                            raise NoAudioStreamError(NoAudioStreamError.USER_MESSAGE)
                         stderr_tail = result.stderr[-800:] if result.stderr else "unknown error"
                         raise RuntimeError(
                             f"ffmpeg split failed for chunk {i} "
@@ -279,12 +418,85 @@ class VideoService:
                     if not chunk.exists() or chunk.stat().st_size == 0:
                         raise RuntimeError(f"No audio content was created for chunk {i}.")
 
-                    with open(chunk, "rb") as af:
-                        tr = client.audio.transcriptions.create(
-                            model=transcribe_model,
-                            file=af,
-                        )
-                    text_part = tr if isinstance(tr, str) else getattr(tr, "text", str(tr))
+                    if is_gemini:
+                        uploaded_file = None
+                        try:
+                            uploaded_file = client.files.upload(file=str(chunk))
+                            try:
+                                interaction = client.interactions.create(
+                                    model=transcribe_model,
+                                    input=[uploaded_file],
+                                    transcription_config=transcription_config,
+                                    generation_config={
+                                        "transcription_config": transcription_config,
+                                    },
+                                )
+                            except (TypeError, ValueError) as err:
+                                err_str = str(err)
+                                interaction_input = [uploaded_file]
+                                if hasattr(uploaded_file, "uri") and getattr(uploaded_file, "uri", None):
+                                    mime = getattr(uploaded_file, "mime_type", None) or "audio/mp3"
+                                    interaction_input = [
+                                        {
+                                            "type": "audio",
+                                            "uri": uploaded_file.uri,
+                                            "mime_type": mime,
+                                        }
+                                    ]
+                                if re.search(r"keyword argument.*transcription_config", err_str):
+                                    interaction = client.interactions.create(
+                                        model=transcribe_model,
+                                        input=interaction_input,
+                                        generation_config={
+                                            "transcription_config": transcription_config,
+                                        },
+                                    )
+                                elif re.search(r"keyword argument.*generation_config", err_str):
+                                    interaction = client.interactions.create(
+                                        model=transcribe_model,
+                                        input=[uploaded_file],
+                                        transcription_config=transcription_config,
+                                    )
+                                elif isinstance(err, ValueError):
+                                    # Schema validation failure on bare File object in input list
+                                    interaction = client.interactions.create(
+                                        model=transcribe_model,
+                                        input=interaction_input,
+                                        generation_config={
+                                            "transcription_config": transcription_config,
+                                        },
+                                    )
+                                else:
+                                    raise
+                            if isinstance(interaction, str):
+                                text_part = interaction
+                            else:
+                                output_text = getattr(interaction, "output_text", None)
+                                if output_text is None:
+                                    output_text = getattr(interaction, "text", None)
+                                text_part = str(output_text) if output_text is not None else ""
+                        finally:
+                            if uploaded_file is not None:
+                                try:
+                                    file_name = (
+                                        getattr(uploaded_file, "name", None)
+                                        or (uploaded_file.get("name") if isinstance(uploaded_file, dict) else None)
+                                        or str(uploaded_file)
+                                    )
+                                    client.files.delete(name=file_name)
+                                except Exception as delete_err:
+                                    logger.warning(
+                                        "Failed to delete Gemini uploaded file %s: %s",
+                                        uploaded_file,
+                                        delete_err,
+                                    )
+                    else:
+                        with open(chunk, "rb") as af:
+                            tr = client.audio.transcriptions.create(
+                                model=transcribe_model,
+                                file=af,
+                            )
+                        text_part = tr if isinstance(tr, str) else getattr(tr, "text", str(tr))
                     return i, text_part, window
 
                 max_workers = min(self._transcribe_max_workers(), max(1, len(chunk_windows)))
@@ -373,6 +585,24 @@ class VideoService:
                     "manifest": fallback_manifest,
                 }
             raise
+
+    _NO_AUDIO_STDERR_MARKERS = (
+        "does not contain any stream",
+        "matches no streams",
+    )
+
+    @classmethod
+    def _stderr_indicates_no_audio(cls, stderr: str | None) -> bool:
+        """Return True when ffmpeg failed because the input has no audio stream.
+
+        With ``-vn`` and an audio-only output (mp3), ffmpeg reports
+        "Output file does not contain any stream" for video-only inputs such as
+        macOS screen recordings captured without microphone/system audio.
+        """
+        if not stderr:
+            return False
+        lowered = stderr.lower()
+        return any(marker in lowered for marker in cls._NO_AUDIO_STDERR_MARKERS)
 
     @staticmethod
     def _plan_transcript_chunk_windows(

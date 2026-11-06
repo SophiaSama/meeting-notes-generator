@@ -685,7 +685,7 @@ def test_length_retry_budget_is_capped(monkeypatch, pipeline):
 
 
 def test_fallback_model_used_after_primary_exhausts_budget(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
     calls: list[dict] = []
 
     def fake_call(messages, **kwargs):
@@ -712,7 +712,7 @@ def test_fallback_model_used_after_primary_exhausts_budget(monkeypatch, pipeline
 
 
 def test_fallback_model_not_used_for_non_length_errors(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
     models: list[str] = []
 
     def fail(messages, **kwargs):
@@ -734,7 +734,7 @@ def test_fallback_model_not_used_for_non_length_errors(monkeypatch, pipeline):
 
 
 def test_fallback_failure_reraises_original_length_error(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
 
     def fake_call(messages, **kwargs):
         if kwargs["model"] == "gpt-4o":
@@ -762,7 +762,7 @@ def _segment_call_kwargs() -> dict:
 
 
 def test_segment_is_split_when_primary_keeps_hitting_limit(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
     calls: list[dict] = []
 
     def fake_call(messages, **kwargs):
@@ -794,7 +794,7 @@ def test_segment_is_split_when_primary_keeps_hitting_limit(monkeypatch, pipeline
 
 
 def test_segment_falls_back_to_raw_text_when_everything_fails(monkeypatch, pipeline):
-    monkeypatch.delenv("LLM_NOTES_FALLBACK_MODEL", raising=False)
+    monkeypatch.setenv("LLM_NOTES_FALLBACK_MODEL", "gpt-4o")
     models: list[str] = []
 
     def always_limited(messages, **kwargs):
@@ -930,3 +930,95 @@ def test_document_model_ocr_processes_frames_in_parallel_and_preserves_contextva
     )
 
     assert observed_efforts == ["low", "low"]
+
+
+@pytest.mark.e2e
+def test_run_pipeline_safe_pops_up_no_audio_detected_error(pipeline, synthetic_video):
+    """A video without an audio track must raise a gr.Error pop-up, not a raw ffmpeg dump."""
+    import gradio as gr
+
+    from meeting_notes.video import NoAudioStreamError
+
+    def no_audio(*args, **kwargs):
+        raise NoAudioStreamError(NoAudioStreamError.USER_MESSAGE)
+
+    pipeline.video_service.transcribe_video_chunked = no_audio
+
+    with pytest.raises(gr.Error) as exc_info:
+        pipeline.run_pipeline_safe(
+            str(synthetic_video),
+            PROXY_ARGS["base_url"],
+            PROXY_ARGS["api_key"],
+            PROXY_ARGS["model"],
+            interval_seconds=30,
+            max_frames=8,
+            notes_style="Executive Summary",
+            output_language="English",
+            return_context=True,
+        )
+
+    assert exc_info.value.title == "No audio detected"
+    assert str(exc_info.value.message).startswith("No audio detected")
+
+
+@pytest.mark.e2e
+def test_run_pipeline_safe_pops_up_transcription_config_error(
+    monkeypatch, pipeline, synthetic_video
+):
+    """Misconfigured non-Gemini transcription model must raise a clear gr.Error pop-up."""
+    from meeting_notes.video import VideoService
+
+    monkeypatch.setenv("LLM_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+    monkeypatch.delenv("LLM_TRANSCRIBE_BASE_URL", raising=False)
+    real_vs = VideoService(pipeline.llm_service)
+    monkeypatch.setattr(pipeline, "video_service", real_vs)
+
+    with pytest.raises(gr.Error) as exc_info:
+        pipeline.run_pipeline_safe(
+            str(synthetic_video),
+            PROXY_ARGS["base_url"],
+            PROXY_ARGS["api_key"],
+            PROXY_ARGS["model"],
+            interval_seconds=30,
+            max_frames=8,
+            notes_style="Executive Summary",
+            output_language="English",
+            return_context=True,
+        )
+
+    assert "LLM_TRANSCRIBE_BASE_URL" in str(exc_info.value.message)
+    assert "gemini-3.5-transcribe" in str(exc_info.value.message)
+
+
+@pytest.mark.e2e
+def test_pipeline_audio_branch_resolves_gemini_key_over_chat_key(
+    monkeypatch, pipeline, synthetic_video
+):
+    """When chat LLM has an OpenAI key, audio branch must route GEMINI_API_KEY to transcription."""
+    captured_kwargs = {}
+
+    def fake_transcribe(video_path, **kwargs):
+        captured_kwargs.update(kwargs)
+        from tests.conftest import _write_fake_transcript
+        return _write_fake_transcript(video_path)
+
+    monkeypatch.setattr(pipeline.video_service, "transcribe_video_chunked", fake_transcribe)
+    monkeypatch.setenv("LLM_TRANSCRIBE_MODEL", "gemini-3.5-transcribe")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSy-transcribe-gemini-key")
+    monkeypatch.delenv("LLM_TRANSCRIBE_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_TRANSCRIBE_BASE_URL", raising=False)
+
+    pipeline.run_pipeline_safe(
+        str(synthetic_video),
+        "https://api.openai.com/v1",
+        "sk-chat-openai-key",
+        "gpt-4o-mini",
+        interval_seconds=30,
+        max_frames=8,
+        notes_style="Executive Summary",
+        output_language="English",
+    )
+
+    assert captured_kwargs.get("api_key") == "AIzaSy-transcribe-gemini-key"
+    assert captured_kwargs.get("transcribe_model") == "gemini-3.5-transcribe"
+

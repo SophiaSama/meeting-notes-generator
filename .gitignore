@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache
 
 # Virtual environments
 .venv
@@ -15,14 +16,12 @@ wheels/
 # Local files
 .env 
 artifacts/
+.scratch/
 
 # Design Docs
 docs/superpowers/
 openspec/
+.agents/
 
 # Development skills
-.github/prompts/opsx*
-.github/skills/openspec*
-.cline*/
-.github/copilot-instructions.md
-.github/instructions/mermaid.instructions.md
+

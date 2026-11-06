@@ -153,7 +153,7 @@ triggers this chain. Auth, network and other errors are raised unchanged.
 | 1 | all | Primary model with a model-aware stage budget |
 | 2 | all | One retry on the primary model with `ceil(budget × LLM_NOTES_LENGTH_RETRY_TOKEN_MULTIPLIER)`, capped at `LLM_NOTES_LENGTH_RETRY_MAX_TOKENS` (32000) |
 | 3 | map only | Split the segment in half (paragraph/sentence boundary) and summarise each half on the primary model |
-| 4 | all | Send once to `LLM_NOTES_FALLBACK_MODEL` (default `gpt-4o`). In the map stage this applies per half |
+| 4 | all | Send once to `LLM_NOTES_FALLBACK_MODEL` from `.env` (no default; skipped when unset). In the map stage this applies per half |
 | 5 | map only | Pass the raw segment text to the reduce step, marked `(raw transcript – summary unavailable)`. The reduce prompt tells the model to extract facts from it directly and mention it under Coverage Notes |
 
 If a reduce or final-notes call is still unrecovered after step 4, the run
@@ -188,7 +188,7 @@ section.
 
 ### Remaining follow-up
 
-- Confirm that `gpt-4o` (or your `LLM_NOTES_FALLBACK_MODEL`) is a model id your provider serves.
+- Confirm that your `LLM_NOTES_FALLBACK_MODEL` is a model id your provider serves.
 - Tune the reasoning-model budgets from real K2.6/K3 `reasoning_chars`
   and `output_tokens` logs.
 - Once the provider's schema for Kimi reasoning control is confirmed, set

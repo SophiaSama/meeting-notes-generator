@@ -190,9 +190,9 @@ Edit `.env` with your provider details. All settings can also be overridden or e
 | `LLM_API_KEY` | *(empty)* | API key for chat completion endpoint (falls back to `OPENAI_API_KEY`). |
 | `LLM_MODEL` | `gpt-4o-mini` | Chat model ID used for meeting notes generation. |
 | `LLM_EXTRA_HEADERS` | *(empty)* | Optional JSON object with extra HTTP headers (e.g. `{"HTTP-Referer": "..."}`). |
-| `LLM_TRANSCRIBE_MODEL` | `gpt-4o-transcribe` | Model ID for audio transcription. |
-| `LLM_TRANSCRIBE_BASE_URL` | *(falls back to `LLM_BASE_URL`)* | Dedicated base URL for `/audio/transcriptions` (e.g. Groq Whisper). |
-| `LLM_TRANSCRIBE_API_KEY` | *(falls back to `LLM_API_KEY`)* | Dedicated API key for audio transcription. |
+| `LLM_TRANSCRIBE_MODEL` | `gemini-3.5-transcribe` | Model ID for audio transcription. Supports native Gemini models (e.g. `gemini-3.5-transcribe`) and OpenAI-compatible models (e.g. `whisper-large-v3-turbo`). |
+| `LLM_TRANSCRIBE_BASE_URL` | *(required for non-Gemini models)* | Dedicated base URL for `/audio/transcriptions` (e.g. Groq Whisper). Required for non-Gemini transcribe models; transcription does not fall back to `LLM_BASE_URL`. |
+| `LLM_TRANSCRIBE_API_KEY` | *(falls back to `LLM_API_KEY` / `GEMINI_API_KEY`)* | Dedicated API key for audio transcription. |
 | `LLM_TRANSCRIBE_MAX_WORKERS` | `4` | Max concurrent threads for ffmpeg audio chunk slicing and transcription requests. |
 | `LLM_OCR_MODEL` | *(empty)* | Vision model ID for OCR text extraction from screenshots (disabled when unset). |
 | `LLM_OCR_MAX_WORKERS` | `4` | Max concurrent threads for vision-model OCR requests across extracted screenshots. |
@@ -204,7 +204,7 @@ Edit `.env` with your provider details. All settings can also be overridden or e
 | `LLM_NOTES_MAP_REDUCE_SEGMENT_CHARS` | `12000` | Segment length for map-reduce chunking. |
 | `LLM_NOTES_USE_BATCH_MAP_REDUCE` | `false` | Enable asynchronous OpenAI Batch API for map-reduce (`/v1/files` + `/v1/batches`). |
 | `LLM_NOTES_LENGTH_RETRY_ENABLED` | `true` | Retry once with enlarged token budget when output ends with `finish_reason="length"`. |
-| `LLM_NOTES_FALLBACK_MODEL` | `gpt-4o` | Fallback model invoked if the primary model produces no visible output. |
+| `LLM_NOTES_FALLBACK_MODEL` | _(unset — disabled)_ | Fallback model invoked if the primary model produces no visible output. No hardcoded default; set it in `.env` to enable. |
 | `LLM_MAX_CHAT_REQUEST_BYTES` | `10485760` (10 MiB) | Maximum payload budget used to recommend screenshot capture frequency. |
 
 ---
@@ -364,14 +364,14 @@ Add the following to your `claude_desktop_config.json`:
 | **Azure OpenAI** | `https://<resource>.openai.azure.com/openai/v1` | Yes | Yes | Yes | Yes |
 | **Groq** | `https://api.groq.com/openai/v1` | Yes | Model-dependent | Yes (`whisper-large-v3`) | Yes |
 | **OpenRouter** | `https://openrouter.ai/api/v1` | Yes | Model-dependent | No | No |
-| **Google Gemini** | `https://generativelanguage.googleapis.com/v1beta/openai` | Yes | Yes | No | No |
+| **Google Gemini** | `https://generativelanguage.googleapis.com/v1beta/openai` | Yes | Yes | Native via `google-genai` (`gemini-3.5-transcribe`) | No |
 | **DeepSeek** | `https://api.deepseek.com/v1` | Yes | No | No | No |
 | **Moonshot (Kimi)**| `https://api.moonshot.ai/v1` | Yes | Model-dependent | No | No |
 | **Ollama (local)** | `http://localhost:11434/v1` | Yes | Model-dependent | No | No |
 | **LM Studio / vLLM**| `http://localhost:1234/v1` / `http://localhost:8000/v1`| Yes | Model-dependent | vLLM only | No |
 
 > [!TIP]
-> If your primary chat provider does not offer an audio transcription endpoint, set `LLM_TRANSCRIBE_BASE_URL` and `LLM_TRANSCRIBE_API_KEY` to a specialized audio provider (such as Groq Whisper or OpenAI), or supply a transcript file directly.
+> For audio transcription, you can use native Google GenAI transcription with `LLM_TRANSCRIBE_MODEL=gemini-3.5-transcribe` (using `GEMINI_API_KEY` or `GOOGLE_API_KEY`), or set `LLM_TRANSCRIBE_BASE_URL` and `LLM_TRANSCRIBE_API_KEY` to an OpenAI-compatible audio provider (such as Groq Whisper or OpenAI), or supply a transcript file directly.
 
 ---
 
@@ -391,7 +391,7 @@ pytest -ra
 
 ## Troubleshooting
 
-- **Transcription fails with 404 Not Found**: Your configured chat provider does not implement `/audio/transcriptions`. Provide dedicated audio credentials via `LLM_TRANSCRIBE_BASE_URL` and `LLM_TRANSCRIBE_API_KEY` (e.g., using Groq or OpenAI Whisper), or upload a transcript file directly.
+- **Transcription Configuration Error**: When using a non-Gemini transcribe model (such as `gpt-4o-transcribe` or `whisper-large-v3-turbo`), you must configure `LLM_TRANSCRIBE_BASE_URL` (and `LLM_TRANSCRIBE_API_KEY` if needed) in `.env` to point to a provider that supports `/audio/transcriptions`. Alternatively, switch `LLM_TRANSCRIBE_MODEL` to `gemini-3.5-transcribe` for native Gemini transcription.
 - **Port already in use**: The app automatically searches ports `7860` to `7870`. Check the console output for the assigned URL.
 - **Duplicate Upload Detected**: Uploaded files are fingerprinted via SHA-256 byte hashing. If a file has been processed, the app notifies you and references existing notes without redundant staging. To reset, clear `artifacts/uploads/.upload_index.json`.
 - **Reasoning Model Exhausts Tokens**: If a model exhausts its completion budget on hidden reasoning tokens (`finish_reason="length"`), the app automatically triggers a token-boosted retry and falls back to `LLM_NOTES_FALLBACK_MODEL` if configured. For detailed background, refer to [Kimi Reasoning-Model Response Handling](docs/kimi-reasoning-response-handling.md).

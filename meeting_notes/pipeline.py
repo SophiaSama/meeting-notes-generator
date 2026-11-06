@@ -17,9 +17,34 @@ import gradio as gr
 
 from .llm import LLMOutputLimitError, LLMService
 from .notes import NotesService
-from .video import VideoService
+from .video import NoAudioStreamError, TranscriptionConfigError, VideoService
 
 logger = logging.getLogger(__name__)
+
+
+class MeetingContext(dict):
+    """Serializable session context for follow-up meeting Q&A."""
+
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class PipelineRunResult(tuple):
+    """4-tuple (thumbnails, notes_text, html_notes, out_path) that also carries .meeting_context."""
+
+    meeting_context: MeetingContext | None
+
+    def __new__(cls, items, meeting_context: MeetingContext | None = None):
+        instance = super().__new__(cls, items)
+        instance.meeting_context = meeting_context
+        return instance
+
+    @property
+    def context(self) -> MeetingContext | None:
+        return self.meeting_context
 
 
 class PipelineService:
@@ -36,6 +61,7 @@ class PipelineService:
     DEFAULT_SEGMENT_MAX_TOKENS = 4_000
     DEFAULT_REDUCE_MAX_TOKENS = 3_500
     DEFAULT_FINAL_MAX_TOKENS = 8_000
+    DEFAULT_QA_MAX_TOKENS = 4_000
     DEFAULT_LENGTH_RETRY_ENABLED = True
     DEFAULT_LENGTH_RETRY_TOKEN_MULTIPLIER = 1.5
     # Reasoning ("thinking") models spend part of max_tokens on hidden
@@ -43,8 +69,8 @@ class PipelineService:
     DEFAULT_REASONING_SEGMENT_MAX_TOKENS = 16_000
     DEFAULT_REASONING_REDUCE_MAX_TOKENS = 16_000
     DEFAULT_REASONING_FINAL_MAX_TOKENS = 24_000
+    DEFAULT_REASONING_QA_MAX_TOKENS = 16_000
     DEFAULT_LENGTH_RETRY_MAX_TOKENS = 32_000
-    DEFAULT_FALLBACK_MODEL = "gpt-4o"
     DEFAULT_FALLBACK_MAX_TOKENS = 16_000
     DEFAULT_OCR_MAX_WORKERS = 4
 
@@ -475,6 +501,15 @@ class PipelineService:
         )
 
     @classmethod
+    def _qa_max_tokens(cls, model: str | None = None) -> int:
+        return cls._stage_max_tokens(
+            "LLM_NOTES_QA_MAX_TOKENS",
+            cls.DEFAULT_QA_MAX_TOKENS,
+            cls.DEFAULT_REASONING_QA_MAX_TOKENS,
+            model,
+        )
+
+    @classmethod
     def _length_retry_max_tokens(cls) -> int:
         return cls._positive_int_env(
             "LLM_NOTES_LENGTH_RETRY_MAX_TOKENS", cls.DEFAULT_LENGTH_RETRY_MAX_TOKENS, 128
@@ -484,12 +519,10 @@ class PipelineService:
     def _fallback_model(cls) -> str:
         """Model used once when the primary model still exhausts its budget.
 
-        Unset -> ``gpt-4o``; set to an empty string to disable the fallback.
+        Read from ``LLM_NOTES_FALLBACK_MODEL`` (e.g. in ``.env``); there is no
+        hardcoded default. Unset or empty disables the fallback.
         """
-        raw_value = os.getenv("LLM_NOTES_FALLBACK_MODEL")
-        if raw_value is None:
-            return cls.DEFAULT_FALLBACK_MODEL
-        return raw_value.strip()
+        return os.getenv("LLM_NOTES_FALLBACK_MODEL", "").strip()
 
     @classmethod
     def _fallback_max_tokens(cls) -> int:
@@ -1445,6 +1478,44 @@ class PipelineService:
                 )
         return warnings
 
+    @staticmethod
+    def build_meeting_context(
+        *,
+        info: dict,
+        markdown_notes: str,
+        transcript_evidence: str,
+        transcript_source_label: str,
+        frames: list[dict],
+        output_language: str,
+        notes_style: str,
+    ) -> MeetingContext:
+        """Build a lightweight, JSON-serializable MeetingContext without PIL or base64 blobs."""
+        clean_info = {
+            "filename": str(info.get("filename", "")),
+            "duration": float(info.get("duration", 0.0) or 0.0),
+            "duration_str": str(info.get("duration_str", "N/A")),
+            "size_mb": str(info.get("size_mb", "0.00")),
+            "resolution": str(info.get("resolution", "N/A")),
+        }
+        frames_metadata = [
+            {
+                "index": idx,
+                "time_str": str(frame.get("time_str", "")),
+                "ocr_text": (frame.get("ocr_text") or "").strip(),
+                "ocr_keywords": list(frame.get("ocr_keywords") or []),
+            }
+            for idx, frame in enumerate(frames or [], start=1)
+        ]
+        return MeetingContext(
+            info=clean_info,
+            markdown_notes=(markdown_notes or "").strip(),
+            transcript_evidence=(transcript_evidence or "").strip(),
+            transcript_source_label=str(transcript_source_label or "transcript"),
+            frames_metadata=frames_metadata,
+            output_language=str(output_language or "English"),
+            notes_style=str(notes_style or "Executive Summary"),
+        )
+
     def run_pipeline(
         self,
         video_file,
@@ -1458,6 +1529,9 @@ class PipelineService:
         transcript_file=None,
         reasoning_effort=None,
         progress=gr.Progress(track_tqdm=False),
+        *,
+        return_context: bool = False,
+        include_context: bool = False,
     ):
         """Run the pipeline with an optional per-run reasoning effort.
 
@@ -1466,7 +1540,7 @@ class PipelineService:
         and silently dropped if the model rejects it.
         """
         with self.llm_service.reasoning_effort(reasoning_effort):
-            return self._run_pipeline_impl(
+            result = self._run_pipeline_impl(
                 video_file,
                 base_url,
                 api_key,
@@ -1478,6 +1552,40 @@ class PipelineService:
                 transcript_file=transcript_file,
                 progress=progress,
             )
+        if return_context or include_context:
+            thumbnails, notes_text, html_notes, out_path = result
+            return thumbnails, notes_text, html_notes, out_path, result.meeting_context
+        return result
+
+    def run_pipeline_with_context(
+        self,
+        video_file,
+        base_url,
+        api_key,
+        model,
+        interval_seconds,
+        max_frames,
+        notes_style,
+        output_language,
+        transcript_file=None,
+        reasoning_effort=None,
+        progress=gr.Progress(track_tqdm=False),
+    ):
+        """Run the pipeline and return the 5-tuple including ``MeetingContext``."""
+        return self.run_pipeline(
+            video_file,
+            base_url,
+            api_key,
+            model,
+            interval_seconds,
+            max_frames,
+            notes_style,
+            output_language,
+            transcript_file=transcript_file,
+            reasoning_effort=reasoning_effort,
+            progress=progress,
+            return_context=True,
+        )
 
     def _run_pipeline_impl(
         self,
@@ -1574,12 +1682,27 @@ class PipelineService:
                 thumbs = [f["pil_image"] for f in extracted_frames]
                 return extracted_frames, meta, thumbs
 
+            transcribe_model = (
+                os.getenv("LLM_TRANSCRIBE_MODEL", "").strip()
+                or "gemini-3.5-transcribe"
+            )
+            transcribe_base_url = os.getenv("LLM_TRANSCRIBE_BASE_URL", "").strip()
+            self.video_service.validate_transcription_config(transcribe_model, transcribe_base_url)
+
             def _audio_branch() -> dict:
-                transcribe_model = os.getenv("LLM_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+                if self.video_service.is_gemini_transcribe_model(transcribe_model):
+                    transcribe_api_key = (
+                        os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip()
+                        or os.getenv("GEMINI_API_KEY", "").strip()
+                        or os.getenv("GOOGLE_API_KEY", "").strip()
+                        or api_key
+                    )
+                else:
+                    transcribe_api_key = os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip() or api_key
                 return self.video_service.transcribe_video_chunked(
                     video_path,
-                    base_url=os.getenv("LLM_TRANSCRIBE_BASE_URL", "").strip() or base_url,
-                    api_key=os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip() or api_key,
+                    base_url=transcribe_base_url,
+                    api_key=transcribe_api_key,
                     transcribe_model=transcribe_model,
                     chunk_seconds=90,
                     chunk_overlap_seconds=10,
@@ -1820,8 +1943,21 @@ class PipelineService:
             )
         )
 
+        meeting_context = self.build_meeting_context(
+            info=info,
+            markdown_notes=markdown_body,
+            transcript_evidence=transcript_evidence,
+            transcript_source_label=transcript_source_label,
+            frames=frames,
+            output_language=output_language,
+            notes_style=notes_style,
+        )
+
         progress(1.0, desc="Done!")
-        return thumbnails, raw_notes + artifact_summary, html_notes, out_path
+        return PipelineRunResult(
+            (thumbnails, raw_notes + artifact_summary, html_notes, out_path),
+            meeting_context=meeting_context,
+        )
 
     def run_pipeline_safe(
         self,
@@ -1836,6 +1972,9 @@ class PipelineService:
         transcript_file=None,
         reasoning_effort=None,
         progress=gr.Progress(track_tqdm=False),
+        *,
+        return_context: bool = False,
+        include_context: bool = False,
     ):
         """UI-safe wrapper: return friendly output on failure instead of raising."""
         try:
@@ -1851,9 +1990,16 @@ class PipelineService:
                 transcript_file=transcript_file,
                 reasoning_effort=reasoning_effort,
                 progress=progress,
+                return_context=return_context,
+                include_context=include_context,
             )
         except gr.Error:
             raise
+        except TranscriptionConfigError as e:
+            raise gr.Error(str(e), title="Configuration error") from e
+        except NoAudioStreamError as e:
+            # Surface as a Gradio pop-up instead of a raw ffmpeg dump in the notes pane.
+            raise gr.Error(NoAudioStreamError.USER_MESSAGE, title="No audio detected") from e
         except Exception as e:
             msg = (
                 "Generation failed. You can upload again and retry.\n\n"
@@ -1865,4 +2011,372 @@ class PipelineService:
                 "Please click <i>Reset</i>, upload the video again, and retry."
                 "</div>"
             )
-            return [], msg, html, None
+            if return_context or include_context:
+                return [], msg, html, None, None
+            return PipelineRunResult(([], msg, html, None), meeting_context=None)
+
+    def run_pipeline_safe_with_context(
+        self,
+        video_file,
+        base_url,
+        api_key,
+        model,
+        interval_seconds,
+        max_frames,
+        notes_style,
+        output_language,
+        transcript_file=None,
+        reasoning_effort=None,
+        progress=gr.Progress(track_tqdm=False),
+    ):
+        """UI-safe wrapper returning the 5-tuple including ``MeetingContext``."""
+        return self.run_pipeline_safe(
+            video_file,
+            base_url,
+            api_key,
+            model,
+            interval_seconds,
+            max_frames,
+            notes_style,
+            output_language,
+            transcript_file=transcript_file,
+            reasoning_effort=reasoning_effort,
+            progress=progress,
+            return_context=True,
+        )
+
+    @staticmethod
+    def _extract_chat_message_text(content) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+                elif isinstance(item, dict):
+                    text_val = item.get("text") or item.get("content")
+                    if isinstance(text_val, str) and text_val.strip():
+                        parts.append(text_val.strip())
+            return "\n".join(parts).strip()
+        if content is None:
+            return ""
+        return str(content).strip()
+
+    @classmethod
+    def _normalize_chat_history(cls, chat_history: list | None) -> list[dict[str, str]]:
+        """Normalize Gradio Chatbot history (dict messages or tuple pairs) into role/content dicts."""
+        if not chat_history:
+            return []
+        normalized: list[dict[str, str]] = []
+        for entry in chat_history:
+            if isinstance(entry, dict):
+                role = str(entry.get("role", "")).strip().lower()
+                content = cls._extract_chat_message_text(entry.get("content"))
+                if role in ("user", "assistant") and content:
+                    normalized.append({"role": role, "content": content})
+            elif isinstance(entry, (tuple, list)) and len(entry) == 2:
+                user_text = cls._extract_chat_message_text(entry[0])
+                assistant_text = cls._extract_chat_message_text(entry[1])
+                if user_text:
+                    normalized.append({"role": "user", "content": user_text})
+                if assistant_text:
+                    normalized.append({"role": "assistant", "content": assistant_text})
+            elif hasattr(entry, "role") and hasattr(entry, "content"):
+                role = str(getattr(entry, "role", "")).strip().lower()
+                content = cls._extract_chat_message_text(getattr(entry, "content", ""))
+                if role in ("user", "assistant") and content:
+                    normalized.append({"role": role, "content": content})
+        return normalized
+
+    @staticmethod
+    def _is_valid_meeting_context(meeting_context: dict | None) -> bool:
+        if not isinstance(meeting_context, dict) or not meeting_context:
+            return False
+        has_notes = bool(str(meeting_context.get("markdown_notes") or "").strip())
+        has_transcript = bool(str(meeting_context.get("transcript_evidence") or "").strip())
+        return has_notes or has_transcript
+
+    @staticmethod
+    def _build_qa_system_prompt(output_language: str) -> str:
+        return textwrap.dedent(
+            f"""
+            You are a grounded meeting Q&A assistant.
+            Answer questions about the meeting using ONLY the provided meeting metadata, generated meeting minutes, captured screenshot timestamps and OCR text hints, and transcript evidence.
+            Rules:
+            1. Prioritize the transcript evidence, OCR text hints, and generated meeting notes as your sole sources of truth.
+            2. Cite or reference relevant timestamps, speakers, or screenshot numbers (e.g., "Screenshot 1 at 0:02") whenever that evidence is present in the transcript or OCR metadata.
+            3. If a question cannot be answered from the provided meeting content, explicitly state that the information is not mentioned in the meeting recording or transcript rather than guessing or fabricating facts.
+            4. Default to responding in {output_language} (or respond in the language of the user's question when clearly asked in another language).
+            5. CRITICAL: Output ONLY the final answer. Do NOT include any chain-of-thought, reasoning, planning, commentary, or internal monologue.
+            """
+        ).strip()
+
+    @classmethod
+    def _build_qa_grounding_message(
+        cls,
+        meeting_context: dict,
+        *,
+        question: str,
+        transcript_char_limit: int | None = None,
+        notes_char_limit: int | None = None,
+    ) -> str:
+        info = meeting_context.get("info") if isinstance(meeting_context.get("info"), dict) else {}
+        filename = info.get("filename") or "Unknown"
+        duration_str = info.get("duration_str") or "N/A"
+        resolution = info.get("resolution") or "N/A"
+        notes_style = meeting_context.get("notes_style") or "Executive Summary"
+        output_language = meeting_context.get("output_language") or "English"
+
+        markdown_notes = str(meeting_context.get("markdown_notes") or "").strip()
+        if notes_char_limit is not None and notes_char_limit >= 0:
+            markdown_notes = markdown_notes[:notes_char_limit]
+
+        transcript_source_label = (
+            str(meeting_context.get("transcript_source_label") or "transcript").strip()
+        )
+        transcript_evidence = str(meeting_context.get("transcript_evidence") or "").strip()
+        if transcript_char_limit is not None and transcript_char_limit >= 0:
+            transcript_evidence = transcript_evidence[:transcript_char_limit]
+
+        frames_metadata = meeting_context.get("frames_metadata") or []
+        if frames_metadata:
+            frame_lines: list[str] = []
+            for i, frame in enumerate(frames_metadata, start=1):
+                if not isinstance(frame, dict):
+                    continue
+                idx = frame.get("index", i)
+                time_str = frame.get("time_str", "N/A")
+                ocr_text = str(frame.get("ocr_text") or "").strip()
+                keywords = frame.get("ocr_keywords") or []
+                line = f"[Screenshot {idx} at {time_str}]: Captured frame."
+                if ocr_text:
+                    line += f" OCR text hint: {ocr_text}"
+                if keywords:
+                    line += f" (keywords: {', '.join(str(k) for k in keywords)})"
+                frame_lines.append(line)
+            frames_section = "\n".join(frame_lines) if frame_lines else "No screenshots captured."
+        else:
+            frames_section = "No screenshots captured (transcript-only mode)."
+
+        return textwrap.dedent(
+            f"""
+            Meeting Context
+            Recording: {filename}
+            Duration: {duration_str} | Resolution: {resolution}
+            Notes style: {notes_style} | Output language: {output_language}
+
+            Captured Screenshots & OCR Metadata:
+            {frames_section}
+
+            Generated Meeting Minutes:
+            {markdown_notes}
+
+            Transcript Evidence ({transcript_source_label}):
+            {transcript_evidence}
+
+            Answer the user's question using the meeting context above. Cite relevant timestamps, speakers, or screenshot numbers when available, and state clearly if something was not mentioned in the meeting.
+            Current question: {question}
+            """
+        ).strip()
+
+    def _assemble_budgeted_qa_messages(
+        self,
+        *,
+        meeting_context: dict,
+        normalized_history: list[dict[str, str]],
+        question: str,
+        model: str,
+        max_tokens: int,
+        system_prompt: str,
+    ) -> list[dict[str, str]]:
+        """Assemble grounding context, bounded history turns, and current question within byte budget."""
+        budget_bytes = self._chat_request_budget_bytes()
+        raw_transcript = str(meeting_context.get("transcript_evidence") or "").strip()
+        raw_notes = str(meeting_context.get("markdown_notes") or "").strip()
+        transcript_limit = min(len(raw_transcript), self._direct_transcript_char_limit())
+        notes_limit = len(raw_notes)
+        history_slice = list(normalized_history)
+
+        def _make_messages(tx_limit: int, md_limit: int, hist: list[dict[str, str]]) -> list[dict[str, str]]:
+            grounding = self._build_qa_grounding_message(
+                meeting_context,
+                question=question,
+                transcript_char_limit=tx_limit,
+                notes_char_limit=md_limit,
+            )
+            return [
+                {"role": "user", "content": grounding},
+                *hist,
+                {"role": "user", "content": question},
+            ]
+
+        messages = _make_messages(transcript_limit, notes_limit, history_slice)
+        if not self._chat_request_exceeds_budget(
+            messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+        ):
+            return messages
+
+        # Step 1: Trim oldest conversation turns from chat_history (in pairs when possible)
+        while history_slice and self._chat_request_exceeds_budget(
+            messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+        ):
+            if (
+                len(history_slice) >= 2
+                and history_slice[0]["role"] == "user"
+                and history_slice[1]["role"] == "assistant"
+            ):
+                history_slice = history_slice[2:]
+            else:
+                history_slice = history_slice[1:]
+            messages = _make_messages(transcript_limit, notes_limit, history_slice)
+
+        # Step 2: Bound transcript evidence if grounding message still exceeds budget
+        while transcript_limit > 200 and self._chat_request_exceeds_budget(
+            messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+        ):
+            next_limit = max(200, transcript_limit // 2)
+            messages = _make_messages(next_limit, notes_limit, history_slice)
+            if next_limit == transcript_limit:
+                break
+            transcript_limit = next_limit
+
+        # Step 3: Bound markdown notes if still exceeding budget under extreme limits
+        while notes_limit > 200 and self._chat_request_exceeds_budget(
+            messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+        ):
+            next_limit = max(200, notes_limit // 2)
+            messages = _make_messages(transcript_limit, next_limit, history_slice)
+            if next_limit == notes_limit:
+                break
+            notes_limit = next_limit
+
+        # Step 4: If budget is still exceeded (e.g. tight budget), binary-search transcript and notes down to 0
+        if self._chat_request_exceeds_budget(
+            messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+        ):
+            while transcript_limit > 0 and self._chat_request_exceeds_budget(
+                messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+            ):
+                transcript_limit = transcript_limit // 2
+                messages = _make_messages(transcript_limit, notes_limit, history_slice)
+            while notes_limit > 0 and self._chat_request_exceeds_budget(
+                messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+            ):
+                notes_limit = notes_limit // 2
+                messages = _make_messages(transcript_limit, notes_limit, history_slice)
+
+        return messages
+
+    def query_meeting(
+        self,
+        question: str,
+        chat_history: list | None,
+        meeting_context: dict | None,
+        base_url: str,
+        api_key: str,
+        model: str,
+        output_language: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Answer a follow-up question grounded in the active session's ``MeetingContext``."""
+        normalized_history = self._normalize_chat_history(chat_history)
+        cleaned_question = (question or "").strip()
+        if not cleaned_question:
+            return "", normalized_history
+
+        if not self._is_valid_meeting_context(meeting_context):
+            raise gr.Error(
+                "Please generate meeting notes first before asking questions about the meeting."
+            )
+        if not (base_url or "").strip():
+            raise gr.Error("LLM base URL is required.")
+        if not (model or "").strip():
+            raise gr.Error("Model name is required.")
+
+        assert isinstance(meeting_context, dict)
+        effective_language = (
+            (output_language or "").strip()
+            or str(meeting_context.get("output_language") or "").strip()
+            or "English"
+        )
+        system_prompt = self._build_qa_system_prompt(effective_language)
+        qa_max_tokens = self._qa_max_tokens(model)
+        messages = self._assemble_budgeted_qa_messages(
+            meeting_context=meeting_context,
+            normalized_history=normalized_history,
+            question=cleaned_question,
+            model=model,
+            max_tokens=qa_max_tokens,
+            system_prompt=system_prompt,
+        )
+
+        with self.llm_service.reasoning_effort(reasoning_effort):
+            reply = self._call_llm_with_length_retry(
+                messages,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                max_tokens=qa_max_tokens,
+                stage="meeting_qa",
+                system_prompt=system_prompt,
+            ).strip()
+
+        updated_history = [
+            *normalized_history,
+            {"role": "user", "content": cleaned_question},
+            {"role": "assistant", "content": reply},
+        ]
+        return reply, updated_history
+
+    def query_meeting_safe(
+        self,
+        question: str,
+        chat_history: list | None,
+        meeting_context: dict | None,
+        base_url: str,
+        api_key: str,
+        model: str,
+        output_language: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> tuple[str, list[dict[str, str]]]:
+        """UI-safe wrapper for ``query_meeting`` that surfaces friendly inline feedback."""
+        normalized_history = self._normalize_chat_history(chat_history)
+        cleaned_question = (question or "").strip()
+        if not cleaned_question:
+            return "", normalized_history
+
+        if not self._is_valid_meeting_context(meeting_context):
+            msg = "Please generate meeting notes first before asking questions about the meeting."
+            updated_history = [
+                *normalized_history,
+                {"role": "user", "content": cleaned_question},
+                {"role": "assistant", "content": msg},
+            ]
+            return msg, updated_history
+
+        try:
+            return self.query_meeting(
+                cleaned_question,
+                normalized_history,
+                meeting_context,
+                base_url,
+                api_key,
+                model,
+                output_language=output_language,
+                reasoning_effort=reasoning_effort,
+            )
+        except gr.Error as e:
+            msg = str(e)
+        except Exception as e:
+            msg = (
+                "Unable to answer the question right now. Please check your LLM settings and try again.\n\n"
+                f"Error: {type(e).__name__}: {e}"
+            )
+
+        updated_history = [
+            *normalized_history,
+            {"role": "user", "content": cleaned_question},
+            {"role": "assistant", "content": msg},
+        ]
+        return msg, updated_history

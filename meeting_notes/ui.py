@@ -40,16 +40,29 @@ footer      { display: none !important; }
 class MeetingNotesApp:
     """UI composition and app lifecycle."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        llm_service: LLMService | None = None,
+        video_service: VideoService | None = None,
+        notes_service: NotesService | None = None,
+        pipeline_service: PipelineService | None = None,
+    ):
         self.defaults = ProxyDefaults.from_env()
-        self.llm_service = LLMService()
-        self.video_service = VideoService(self.llm_service)
-        self.notes_service = NotesService()
-        self.pipeline_service = PipelineService(
-            self.llm_service,
-            self.video_service,
-            self.notes_service,
-        )
+        if pipeline_service is not None:
+            self.pipeline_service = pipeline_service
+            self.llm_service = llm_service or pipeline_service.llm_service
+            self.video_service = video_service or pipeline_service.video_service
+            self.notes_service = notes_service or pipeline_service.notes_service
+        else:
+            self.llm_service = llm_service or LLMService()
+            self.video_service = video_service or VideoService(self.llm_service)
+            self.notes_service = notes_service or NotesService()
+            self.pipeline_service = PipelineService(
+                self.llm_service,
+                self.video_service,
+                self.notes_service,
+            )
         self.demo = self._build_demo()
 
     def _suggest_capture_settings(self, video_path):
@@ -115,6 +128,87 @@ class MeetingNotesApp:
         interval_update, max_frames_update, capture_hint_update = self._suggest_capture_settings(video_path)
         return interval_update, max_frames_update, capture_hint_update, duplicate_banner_update
 
+    def _on_generate_click(
+        self,
+        video_file,
+        base_url,
+        api_key,
+        model,
+        interval_seconds,
+        max_frames,
+        notes_style,
+        output_language,
+        transcript_file=None,
+        reasoning_effort=None,
+        progress=gr.Progress(track_tqdm=False),
+    ):
+        """Generate notes, store the session's MeetingContext, and reset prior Q&A chat."""
+        thumbnails, notes_text, html_notes, out_path, meeting_context = (
+            self.pipeline_service.run_pipeline_safe(
+                video_file,
+                base_url,
+                api_key,
+                model,
+                interval_seconds,
+                max_frames,
+                notes_style,
+                output_language,
+                transcript_file=transcript_file,
+                reasoning_effort=reasoning_effort,
+                progress=progress,
+                return_context=True,
+            )
+        )
+        if not self.pipeline_service._is_valid_meeting_context(meeting_context):
+            meeting_context = None
+        return thumbnails, notes_text, html_notes, out_path, meeting_context, [], ""
+
+    def _on_chat_submit(
+        self,
+        question,
+        chat_history,
+        meeting_context,
+        base_url,
+        api_key,
+        model,
+        output_language=None,
+        reasoning_effort=None,
+    ):
+        """Handle a Q&A turn against the active session's MeetingContext."""
+        _reply, updated_history = self.pipeline_service.query_meeting_safe(
+            question,
+            chat_history,
+            meeting_context,
+            base_url,
+            api_key,
+            model,
+            output_language=output_language,
+            reasoning_effort=reasoning_effort,
+        )
+        return updated_history, ""
+
+    @staticmethod
+    def _on_clear_chat():
+        """Clear only the Q&A conversation history and question input."""
+        return [], ""
+
+    @staticmethod
+    def _on_reset():
+        """Reset all inputs, generated outputs, session MeetingContext, and Q&A history."""
+        return (
+            None,
+            None,
+            [],
+            "",
+            "",
+            None,
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+            None,
+            [],
+            "",
+        )
+
     @staticmethod
     def find_available_port(start: int = 7860, end: int = 7870, host: str = "127.0.0.1") -> int:
         for port in range(start, end + 1):
@@ -128,6 +222,9 @@ class MeetingNotesApp:
 
     def _build_demo(self):
         with gr.Blocks(title="Meeting Notes Agent") as demo:
+            meeting_context_state = gr.State(value=None)
+            self.meeting_context_state = meeting_context_state
+
             with gr.Row(elem_classes="title-row"):
                 gr.Markdown("# Meeting Notes Agent")
             gr.Markdown(
@@ -253,9 +350,40 @@ class MeetingNotesApp:
                             html_preview = gr.HTML(label="")
                         with gr.Tab("Download"):
                             download_file = gr.File(label="Download HTML notes")
+                        with gr.Tab("Chat with Meeting"):
+                            chatbot = gr.Chatbot(
+                                label="Meeting Q&A",
+                                height=360,
+                                placeholder="Generate meeting notes first, then ask questions about the meeting here.",
+                            )
+                            with gr.Row():
+                                chat_input = gr.Textbox(
+                                    label="Question",
+                                    placeholder="Ask a question about the meeting...",
+                                    show_label=False,
+                                    scale=4,
+                                    lines=1,
+                                )
+                                send_btn = gr.Button("Send", variant="primary", scale=1)
+                                clear_chat_btn = gr.Button("Clear Chat", variant="secondary", scale=1)
+
+            self.video_input = video_input
+            self.transcript_input = transcript_input
+            self.screenshots_gallery = screenshots_gallery
+            self.notes_output = notes_output
+            self.html_preview = html_preview
+            self.download_file = download_file
+            self.dup_banner = dup_banner
+            self.capture_hint = capture_hint
+            self.chatbot = chatbot
+            self.chat_input = chat_input
+            self.send_btn = send_btn
+            self.clear_chat_btn = clear_chat_btn
+            self.generate_btn = generate_btn
+            self.reset_btn = reset_btn
 
             generate_btn.click(
-                self.pipeline_service.run_pipeline_safe,
+                self._on_generate_click,
                 inputs=[
                     video_input,
                     base_url_input,
@@ -268,7 +396,41 @@ class MeetingNotesApp:
                     transcript_input,
                     reasoning_effort_input,
                 ],
-                outputs=[screenshots_gallery, notes_output, html_preview, download_file],
+                outputs=[
+                    screenshots_gallery,
+                    notes_output,
+                    html_preview,
+                    download_file,
+                    meeting_context_state,
+                    chatbot,
+                    chat_input,
+                ],
+            )
+
+            chat_inputs = [
+                chat_input,
+                chatbot,
+                meeting_context_state,
+                base_url_input,
+                api_key_input,
+                model_input,
+                language_dd,
+                reasoning_effort_input,
+            ]
+            send_btn.click(
+                self._on_chat_submit,
+                inputs=chat_inputs,
+                outputs=[chatbot, chat_input],
+            )
+            chat_input.submit(
+                self._on_chat_submit,
+                inputs=chat_inputs,
+                outputs=[chatbot, chat_input],
+            )
+            clear_chat_btn.click(
+                self._on_clear_chat,
+                inputs=[],
+                outputs=[chatbot, chat_input],
             )
 
             video_input.change(
@@ -279,18 +441,21 @@ class MeetingNotesApp:
             )
 
             reset_btn.click(
-                lambda: (
-                    None,
-                    None,
-                    [],
-                    "",
-                    "",
-                    None,
-                    gr.update(value="", visible=False),
-                    gr.update(value="", visible=False),
-                ),
+                self._on_reset,
                 inputs=[],
-                outputs=[video_input, transcript_input, screenshots_gallery, notes_output, html_preview, download_file, dup_banner, capture_hint],
+                outputs=[
+                    video_input,
+                    transcript_input,
+                    screenshots_gallery,
+                    notes_output,
+                    html_preview,
+                    download_file,
+                    dup_banner,
+                    capture_hint,
+                    meeting_context_state,
+                    chatbot,
+                    chat_input,
+                ],
             )
 
         return demo
