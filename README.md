@@ -1,11 +1,12 @@
 # Meeting Notes Helper
 
+[![CI](https://github.com/SophiaSama/meeting-notes-generator/actions/workflows/ci.yml/badge.svg)](https://github.com/SophiaSama/meeting-notes-generator/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker Ready](https://img.shields.io/badge/docker-ready-blue.svg)](docker-compose.yml)
 [![MCP Enabled](https://img.shields.io/badge/MCP-fastmcp-green.svg)](mcp_server.py)
 
-**Meeting Notes Helper** is a multimodal meeting intelligence tool and local Gradio application that transforms meeting video recordings or text transcripts into structured Markdown minutes and visual HTML reports using any OpenAI-compatible LLM provider.
+**Meeting Notes Helper** is a multimodal meeting intelligence tool and local Gradio application that transforms meeting video recordings or text transcripts into structured Markdown minutes, visual HTML reports, and an interactive **Meeting Q&A Chatbot** using any OpenAI-compatible LLM provider and native Google Gemini or OpenAI-compatible audio transcription.
 
 It also provides a first-class **Model Context Protocol (MCP)** server, enabling AI assistants such as Claude Desktop, VS Code Copilot, and Cursor to execute the entire meeting analysis pipeline programmatically.
 
@@ -14,15 +15,17 @@ It also provides a first-class **Model Context Protocol (MCP)** server, enabling
 ## Key Features
 
 - **Multimodal Video & Transcript Input**: Process video files (`.mp4`, `.mkv`, `.webm`, etc.) with automatic screenshot and audio extraction, or supply pre-existing text transcripts (`.txt`, `.md`, `.rtf`) to skip heavy media processing.
+- **Native Gemini & OpenAI-Compatible Audio Transcription**: Supports native Google GenAI audio transcription (`gemini-3.5-transcribe` via `google-genai` with speaker diarization and timestamps) alongside OpenAI-compatible `/audio/transcriptions` endpoints (e.g. OpenAI, Groq Whisper), with upfront configuration and audio-track validation.
+- **Interactive Meeting Q&A Chatbot**: Ask multi-turn follow-up questions in the **Chat with Meeting** tab after generating notes. Answers are grounded in the generated meeting minutes, full or condensed transcript evidence, and per-frame OCR + timestamp metadata, with session isolation, dynamic model/reasoning-effort switching between turns, and one-click chat reset.
 - **Visual Context & Slide Capture**: Samples high-value presentation frames/slides from recordings, performs concurrent OCR text extraction, and embeds screenshots alongside relevant discussion sections in the HTML report.
 - **Parallel Visual & Audio Extraction**: Executes video frame extraction (+ OCR) and audio chunk transcription concurrently, with multi-threaded chunk slicing/transcription (`LLM_TRANSCRIBE_MAX_WORKERS`) and frame OCR (`LLM_OCR_MAX_WORKERS`).
 - **Overlap-Aware Audio Chunking**: Splits long audio recordings into overlapping segments with boundary deduplication, eliminating cutoff sentences at chunk edges.
 - **Scalable Map-Reduce Summarization**: Long transcripts exceeding token thresholds are summarized through a map-reduce pipeline (segment summaries merged into a cohesive digest), supporting both synchronous calls and the asynchronous OpenAI Batch API (`/v1/files` + `/v1/batches`).
-- **Deep Reasoning Model Support**: Built-in support for reasoning models (e.g. OpenAI o1/o3, Moonshot Kimi, DeepSeek-R1) with customizable reasoning effort (`none`, `minimal`, `low`, `medium`, `high`), automatic empty-response token-budget retries (`finish_reason="length"`), and fallback model support.
+- **Deep Reasoning Model Support**: Built-in support for reasoning models (e.g. OpenAI o1/o3, Moonshot Kimi, DeepSeek-R1) with customizable reasoning effort (`none`, `minimal`, `low`, `medium`, `high`), chain-of-thought stripping, automatic empty-response token-budget retries (`finish_reason="length"`), and fallback model support.
 - **Content-Based Duplicate Detection**: Uses SHA-256 byte hashing to detect duplicate uploads regardless of file renaming, preventing redundant disk consumption while allowing instant regeneration.
 - **Tailored Note Formats**: Output in multiple structured styles (Executive Summary, Detailed Notes, Action Items Focus, Technical Minutes) and languages.
 - **Model Context Protocol (MCP)**: Native FastMCP implementation offering stdio and SSE transports for tool calling and artifact resource inspection.
-- **Docker & Docker Compose**: Production-ready container images with non-root security and multi-stage uv caching for both Web UI and MCP services.
+- **Docker & GitHub Actions CI**: Production-ready container images with non-root security and multi-stage `uv` caching for both Web UI and MCP services, backed by automated GitHub Actions CI for `pytest` and Docker builds.
 
 ---
 
@@ -40,7 +43,7 @@ flowchart TD
 
 	D --> H[Generate Meeting Notes]
 	H --> I[PipelineService.run_pipeline_safe]
-	I --> J[Resolve uploaded filepath]
+	I --> J[Resolve uploaded filepath & validate transcription config]
 	J --> K[Stage stable copy in artifacts/uploads]
 	K --> L[VideoService.get_video_info]
 	L --> P_SPLIT{Parallel Visual & Audio Branches}
@@ -48,9 +51,12 @@ flowchart TD
 	M --> M_OCR[Concurrent Frame OCR]
 	P_SPLIT -->|Audio Worker| N[VideoService.transcribe_video_chunked]
 
-	N --> O[Plan overlapped chunk windows]
-	O --> P[Concurrent ffmpeg slice + Transcription API per chunk]
-	P --> QX[Merge neighbouring chunk text with boundary dedupe]
+	N --> O[Plan overlapped chunk windows & verify audio track]
+	O --> P_BACKEND{Transcribe Model Type?}
+	P_BACKEND -->|gemini-*| P_GEM["Concurrent ffmpeg slice + Google GenAI Files & Interactions API (diarization + timestamps)"]
+	P_BACKEND -->|OpenAI-compatible| P_OAI["Concurrent ffmpeg slice + OpenAI /audio/transcriptions"]
+	P_GEM --> QX[Merge neighbouring chunk text with boundary dedupe]
+	P_OAI --> QX
 	QX --> QY[Transcript files and manifest in artifacts/transcripts]
 	QY --> QA{Transcript length > threshold?}
 	QA -->|No| R
@@ -76,6 +82,15 @@ flowchart TD
 
 	T --> W[Save minutes markdown in artifacts/meeting_minutes]
 	V --> X[Return preview and downloadable HTML]
+	T --> CTX["Build session MeetingContext (gr.State)"]
+	M_OCR --> CTX
+	QY --> CTX
+
+	CTX --> CHAT[Chat with Meeting Tab]
+	D --> CHAT
+	CHAT --> QA_CALL[PipelineService.query_meeting_safe]
+	QA_CALL --> QA_LLM[Grounded multi-turn LLM Q&A with length-retry & CoT stripping]
+	QA_LLM --> CHAT
 ```
 
 ### Component Responsibilities
@@ -85,9 +100,9 @@ flowchart TD
 | `main.py` | Application entrypoint; bootstraps runtime and launches the Gradio UI. |
 | `mcp_server.py` | FastMCP server exposing tools and resources over stdio or SSE. |
 | `meeting_notes/bootstrap.py` | Environment setup, `.env` parsing, telemetry suppression, and proxy configuration. |
-| `meeting_notes/ui.py` | Gradio interface layout, event binding, and reactive capture recommendation hints. |
-| `meeting_notes/pipeline.py` | End-to-end orchestration, parallel visual/audio branch execution, upload deduplication, token budgeting, and fallback management. |
-| `meeting_notes/video.py` | Video metadata probing, screenshot sampling, concurrent ffmpeg audio windowing/transcription, and boundary text deduplication. |
+| `meeting_notes/ui.py` | Gradio interface layout, session-isolated `gr.State` management, **Chat with Meeting** Q&A tab, event binding, and reactive capture recommendation hints. |
+| `meeting_notes/pipeline.py` | End-to-end orchestration, parallel visual/audio branch execution, upload deduplication, `MeetingContext` construction, grounded multi-turn Q&A (`query_meeting` / `query_meeting_safe`), token budgeting, and fallback management. |
+| `meeting_notes/video.py` | Video metadata probing, screenshot sampling, concurrent `ffmpeg` audio windowing, native Google Gemini (`google-genai`) and OpenAI-compatible transcription routing, audio-track detection, and boundary text deduplication. |
 | `meeting_notes/llm.py` | Unified client wrapper for OpenAI-compatible chat, vision, batch, and transcription endpoints with reasoning control. |
 | `meeting_notes/notes.py` | Markdown parsing, image embedding, template rendering, and HTML report generation. |
 
@@ -97,6 +112,9 @@ flowchart TD
 
 ```text
 meeting-notes-generator/
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # GitHub Actions CI (pytest + Docker build & compose check)
 ├── artifacts/                  # Generated runtime artifacts (git-ignored)
 │   ├── meeting_minutes/        # Markdown minutes (*.minutes.md)
 │   ├── transcripts/            # Chunk transcripts, full text, and manifests
@@ -108,15 +126,20 @@ meeting-notes-generator/
 │   ├── bootstrap.py            # Runtime configuration and environment loading
 │   ├── llm.py                  # LLM, Batch, and Audio client service
 │   ├── notes.py                # Markdown to HTML report generator
-│   ├── pipeline.py             # Main processing pipeline service
-│   ├── ui.py                   # Gradio Web UI definition
-│   └── video.py                # Video extraction and audio chunking service
-├── tests/                      # Automated test suite (110+ tests)
+│   ├── pipeline.py             # Main processing pipeline & Meeting Q&A service
+│   ├── ui.py                   # Gradio Web UI definition & Q&A chat wiring
+│   └── video.py                # Video extraction, Gemini/OpenAI audio transcription
+├── specs/                      # Feature specifications
+│   └── meeting-qa-chatbot.md   # Meeting Q&A Chatbot specification
+├── tests/                      # Automated test suite (160+ tests)
 │   ├── conftest.py
 │   ├── test_e2e_pipeline.py
 │   ├── test_llm_reasoning_control.py
 │   ├── test_llm_service.py
 │   ├── test_mcp_server.py
+│   ├── test_meeting_qa_chatbot.py
+│   ├── test_meeting_qa_lifecycle.py
+│   ├── test_meeting_qa_resilience.py
 │   └── test_video_service.py
 ├── .dockerignore
 ├── .env.example                # Template for environment configuration
@@ -153,7 +176,7 @@ meeting-notes-generator/
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/meeting-notes-generator.git
+git clone https://github.com/SophiaSama/meeting-notes-generator.git
 cd meeting-notes-generator
 
 # Install dependencies into virtual environment
@@ -188,11 +211,11 @@ Edit `.env` with your provider details. All settings can also be overridden or e
 |---|---|---|
 | `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL for OpenAI-compatible chat API (falls back to `OPENAI_BASE_URL`). |
 | `LLM_API_KEY` | *(empty)* | API key for chat completion endpoint (falls back to `OPENAI_API_KEY`). |
-| `LLM_MODEL` | `gpt-4o-mini` | Chat model ID used for meeting notes generation. |
+| `LLM_MODEL` | `gpt-4o-mini` | Chat model ID used for meeting notes generation and Q&A chat. |
 | `LLM_EXTRA_HEADERS` | *(empty)* | Optional JSON object with extra HTTP headers (e.g. `{"HTTP-Referer": "..."}`). |
 | `LLM_TRANSCRIBE_MODEL` | `gemini-3.5-transcribe` | Model ID for audio transcription. Supports native Gemini models (e.g. `gemini-3.5-transcribe`) and OpenAI-compatible models (e.g. `whisper-large-v3-turbo`). |
 | `LLM_TRANSCRIBE_BASE_URL` | *(required for non-Gemini models)* | Dedicated base URL for `/audio/transcriptions` (e.g. Groq Whisper). Required for non-Gemini transcribe models; transcription does not fall back to `LLM_BASE_URL`. |
-| `LLM_TRANSCRIBE_API_KEY` | *(falls back to `LLM_API_KEY` / `GEMINI_API_KEY`)* | Dedicated API key for audio transcription. |
+| `LLM_TRANSCRIBE_API_KEY` | *(falls back to `GEMINI_API_KEY` / `GOOGLE_API_KEY` / `LLM_API_KEY`)* | Dedicated API key for audio transcription. For `gemini-*` transcribe models, `GEMINI_API_KEY` and `GOOGLE_API_KEY` take precedence over the chat API key. |
 | `LLM_TRANSCRIBE_MAX_WORKERS` | `4` | Max concurrent threads for ffmpeg audio chunk slicing and transcription requests. |
 | `LLM_OCR_MODEL` | *(empty)* | Vision model ID for OCR text extraction from screenshots (disabled when unset). |
 | `LLM_OCR_MAX_WORKERS` | `4` | Max concurrent threads for vision-model OCR requests across extracted screenshots. |
@@ -205,7 +228,7 @@ Edit `.env` with your provider details. All settings can also be overridden or e
 | `LLM_NOTES_USE_BATCH_MAP_REDUCE` | `false` | Enable asynchronous OpenAI Batch API for map-reduce (`/v1/files` + `/v1/batches`). |
 | `LLM_NOTES_LENGTH_RETRY_ENABLED` | `true` | Retry once with enlarged token budget when output ends with `finish_reason="length"`. |
 | `LLM_NOTES_FALLBACK_MODEL` | _(unset — disabled)_ | Fallback model invoked if the primary model produces no visible output. No hardcoded default; set it in `.env` to enable. |
-| `LLM_MAX_CHAT_REQUEST_BYTES` | `10485760` (10 MiB) | Maximum payload budget used to recommend screenshot capture frequency. |
+| `LLM_MAX_CHAT_REQUEST_BYTES` | `10485760` (10 MiB) | Maximum payload budget used to recommend screenshot capture frequency and bound Q&A grounding context. |
 
 ---
 
@@ -275,6 +298,11 @@ docker run -p 7860:7860 --env-file .env -v $(pwd)/artifacts:/app/artifacts meeti
      - **Markdown Notes**: Rendered markdown minutes.
      - **HTML Preview**: Interactive report preview with inline images.
      - **Download**: Export the standalone HTML report for sharing.
+5. **Chat with Meeting (Follow-up Q&A)**:
+   - Open the **Chat with Meeting** tab once meeting notes generation completes.
+   - Ask multi-turn follow-up questions about specific discussion details, speaker statements, action items, or slide OCR text. Answers are grounded in the session's generated minutes, transcript (or map-reduce digest), and frame OCR/timestamp metadata.
+   - You can change the **Model**, **Reasoning effort**, or **Output language** dropdowns between turns to adjust how subsequent questions are answered.
+   - Click **Clear Chat** to start a fresh line of questioning while keeping the current meeting notes and context intact, or click **Reset** (or generate notes on a new recording) to clear the session and bind to a new meeting.
 
 ---
 
@@ -375,9 +403,9 @@ Add the following to your `claude_desktop_config.json`:
 
 ---
 
-## Testing
+## Testing & CI
 
-The project contains a comprehensive test suite covering the end-to-end pipeline, video chunking, LLM reasoning handling, and MCP integration without requiring network access:
+The project contains a 160+ test suite covering the end-to-end pipeline, native Gemini and OpenAI-compatible video chunk transcription, Meeting Q&A chatbot grounding/lifecycle/resilience, LLM reasoning handling, and MCP integration without requiring network access:
 
 ```bash
 # Run all tests using uv
@@ -387,11 +415,14 @@ uv run pytest
 pytest -ra
 ```
 
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) automatically runs the full `pytest` suite on Python 3.13 and validates the `Dockerfile` and `docker-compose.yml` build on pushes to `main` and `feat/**` branches as well as pull requests.
+
 ---
 
 ## Troubleshooting
 
 - **Transcription Configuration Error**: When using a non-Gemini transcribe model (such as `gpt-4o-transcribe` or `whisper-large-v3-turbo`), you must configure `LLM_TRANSCRIBE_BASE_URL` (and `LLM_TRANSCRIBE_API_KEY` if needed) in `.env` to point to a provider that supports `/audio/transcriptions`. Alternatively, switch `LLM_TRANSCRIBE_MODEL` to `gemini-3.5-transcribe` for native Gemini transcription.
+- **No Audio Track Detected**: If an uploaded video recording contains no audio stream, the pipeline halts early with a clear error message rather than sending empty chunks to the transcription API. Supply a video with an audio track or upload a `.txt`/`.md` transcript file directly.
 - **Port already in use**: The app automatically searches ports `7860` to `7870`. Check the console output for the assigned URL.
 - **Duplicate Upload Detected**: Uploaded files are fingerprinted via SHA-256 byte hashing. If a file has been processed, the app notifies you and references existing notes without redundant staging. To reset, clear `artifacts/uploads/.upload_index.json`.
 - **Reasoning Model Exhausts Tokens**: If a model exhausts its completion budget on hidden reasoning tokens (`finish_reason="length"`), the app automatically triggers a token-boosted retry and falls back to `LLM_NOTES_FALLBACK_MODEL` if configured. For detailed background, refer to [Kimi Reasoning-Model Response Handling](docs/kimi-reasoning-response-handling.md).
