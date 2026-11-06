@@ -21,6 +21,7 @@ artifacts/
 # Design Docs
 docs/superpowers/
 openspec/
+.agents/
 
 # Development skills
 

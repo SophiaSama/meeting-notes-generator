@@ -17,7 +17,7 @@ import gradio as gr
 
 from .llm import LLMOutputLimitError, LLMService
 from .notes import NotesService
-from .video import NoAudioStreamError, VideoService
+from .video import NoAudioStreamError, TranscriptionConfigError, VideoService
 
 logger = logging.getLogger(__name__)
 
@@ -1682,12 +1682,27 @@ class PipelineService:
                 thumbs = [f["pil_image"] for f in extracted_frames]
                 return extracted_frames, meta, thumbs
 
+            transcribe_model = (
+                os.getenv("LLM_TRANSCRIBE_MODEL", "").strip()
+                or "gemini-3.5-transcribe"
+            )
+            transcribe_base_url = os.getenv("LLM_TRANSCRIBE_BASE_URL", "").strip()
+            self.video_service.validate_transcription_config(transcribe_model, transcribe_base_url)
+
             def _audio_branch() -> dict:
-                transcribe_model = os.getenv("LLM_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+                if self.video_service.is_gemini_transcribe_model(transcribe_model):
+                    transcribe_api_key = (
+                        os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip()
+                        or os.getenv("GEMINI_API_KEY", "").strip()
+                        or os.getenv("GOOGLE_API_KEY", "").strip()
+                        or api_key
+                    )
+                else:
+                    transcribe_api_key = os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip() or api_key
                 return self.video_service.transcribe_video_chunked(
                     video_path,
-                    base_url=os.getenv("LLM_TRANSCRIBE_BASE_URL", "").strip() or base_url,
-                    api_key=os.getenv("LLM_TRANSCRIBE_API_KEY", "").strip() or api_key,
+                    base_url=transcribe_base_url,
+                    api_key=transcribe_api_key,
                     transcribe_model=transcribe_model,
                     chunk_seconds=90,
                     chunk_overlap_seconds=10,
@@ -1980,6 +1995,8 @@ class PipelineService:
             )
         except gr.Error:
             raise
+        except TranscriptionConfigError as e:
+            raise gr.Error(str(e), title="Configuration error") from e
         except NoAudioStreamError as e:
             # Surface as a Gradio pop-up instead of a raw ffmpeg dump in the notes pane.
             raise gr.Error(NoAudioStreamError.USER_MESSAGE, title="No audio detected") from e

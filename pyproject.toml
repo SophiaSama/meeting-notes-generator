@@ -8,6 +8,7 @@ dependencies = [
     "ddgs>=9.14.4",
     "dotenv>=0.9.9",
     "gradio>=6.15.2",
+    "google-genai>=2.30.1",
     "imageio-ffmpeg>=0.5.1",
     "ipykernel>=7.3.0",
     "mcp[cli]>=1.0.0",
