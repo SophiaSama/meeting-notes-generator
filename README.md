@@ -6,7 +6,7 @@
 [![Docker Ready](https://img.shields.io/badge/docker-ready-blue.svg)](docker-compose.yml)
 [![MCP Enabled](https://img.shields.io/badge/MCP-fastmcp-green.svg)](mcp_server.py)
 
-**Meeting Notes Helper** is a multimodal meeting intelligence tool and local Gradio application that transforms meeting video recordings or text transcripts into structured Markdown minutes, visual HTML reports, and an interactive **Meeting Q&A Chatbot** using any OpenAI-compatible LLM provider and native Google Gemini or OpenAI-compatible audio transcription.
+**Meeting Notes Helper** is a multimodal meeting intelligence tool and local Gradio application that transforms meeting Recordings or Transcripts into structured Meeting Notes (rendered HTML, Markdown, and downloadable export) and enables grounded **Meeting Chat** using any OpenAI-compatible Provider and native Google Gemini or OpenAI-compatible audio transcription.
 
 It also provides a first-class **Model Context Protocol (MCP)** server, enabling AI assistants such as Claude Desktop, VS Code Copilot, and Cursor to execute the entire meeting analysis pipeline programmatically.
 
@@ -14,16 +14,17 @@ It also provides a first-class **Model Context Protocol (MCP)** server, enabling
 
 ## Key Features
 
-- **Multimodal Video & Transcript Input**: Process video files (`.mp4`, `.mkv`, `.webm`, etc.) with automatic screenshot and audio extraction, or supply pre-existing text transcripts (`.txt`, `.md`, `.rtf`) to skip heavy media processing.
+- **Multimodal Recording & Transcript Input**: Process Recording files (`.mp4`, `.mkv`, `.webm`, etc.) with automatic Screenshot and audio extraction, or supply pre-existing Transcripts (`.txt`, `.md`, `.rtf`) to skip Recording processing.
 - **Native Gemini & OpenAI-Compatible Audio Transcription**: Supports native Google GenAI audio transcription (`gemini-3.5-transcribe` via `google-genai` with speaker diarization and timestamps) alongside OpenAI-compatible `/audio/transcriptions` endpoints (e.g. OpenAI, Groq Whisper), with upfront configuration and audio-track validation.
-- **Interactive Meeting Q&A Chatbot**: Ask multi-turn follow-up questions in the **Chat with Meeting** tab after generating notes. Answers are grounded in the generated meeting minutes, full or condensed transcript evidence, and per-frame OCR + timestamp metadata, with session isolation, dynamic model/reasoning-effort switching between turns, and one-click chat reset.
-- **Visual Context & Slide Capture**: Samples high-value presentation frames/slides from recordings, performs concurrent OCR text extraction, and embeds screenshots alongside relevant discussion sections in the HTML report.
-- **Parallel Visual & Audio Extraction**: Executes video frame extraction (+ OCR) and audio chunk transcription concurrently, with multi-threaded chunk slicing/transcription (`LLM_TRANSCRIBE_MAX_WORKERS`) and frame OCR (`LLM_OCR_MAX_WORKERS`).
+- **Grounded Meeting Chat**: Ask multi-turn follow-up questions in the **Meeting Chat** tab after generating Meeting Notes. Answers are grounded in the generated Meeting Notes, full or condensed Transcript evidence, and per-Screenshot OCR + timestamp metadata, with session isolation, dynamic model/reasoning-effort switching between turns, and one-click chat reset.
+- **Visual Context & Screenshot Sampling**: Samples high-value presentation Screenshots from Recordings, performs concurrent OCR text extraction, and embeds Screenshots alongside relevant discussion sections in the rendered Meeting Notes.
+- **Parallel Visual & Audio Extraction**: Executes Screenshot extraction (+ OCR) and audio chunk transcription concurrently, with multi-threaded chunk slicing/transcription (`LLM_TRANSCRIBE_MAX_WORKERS`) and Screenshot OCR (`LLM_OCR_MAX_WORKERS`).
 - **Overlap-Aware Audio Chunking**: Splits long audio recordings into overlapping segments with boundary deduplication, eliminating cutoff sentences at chunk edges.
 - **Scalable Map-Reduce Summarization**: Long transcripts exceeding token thresholds are summarized through a map-reduce pipeline (segment summaries merged into a cohesive digest), supporting both synchronous calls and the asynchronous OpenAI Batch API (`/v1/files` + `/v1/batches`).
 - **Deep Reasoning Model Support**: Built-in support for reasoning models (e.g. OpenAI o1/o3, Moonshot Kimi, DeepSeek-R1) with customizable reasoning effort (`none`, `minimal`, `low`, `medium`, `high`), chain-of-thought stripping, automatic empty-response token-budget retries (`finish_reason="length"`), and fallback model support.
 - **Content-Based Duplicate Detection**: Uses SHA-256 byte hashing to detect duplicate uploads regardless of file renaming, preventing redundant disk consumption while allowing instant regeneration.
-- **Tailored Note Formats**: Output in multiple structured styles (Executive Summary, Detailed Notes, Action Items Focus, Technical Minutes) and languages.
+- **Tailored Notes Styles**: Output in multiple structured Notes Styles (Executive Summary, Detailed Notes, Action Items Focus, Technical Minutes) and languages.
+- **Interactive Meeting Chat**: Question-and-answer conversation grounded in the active meeting's Meeting Notes and Transcript, featuring starter question chips ("What were the action items?", "Who owns what?").
 - **Model Context Protocol (MCP)**: Native FastMCP implementation offering stdio and SSE transports for tool calling and artifact resource inspection.
 - **Docker & GitHub Actions CI**: Production-ready container images with non-root security and multi-stage `uv` caching for both Web UI and MCP services, backed by automated GitHub Actions CI for `pytest` and Docker builds.
 
@@ -72,25 +73,25 @@ flowchart TD
  QH --> R
  QI --> R
 
- M_OCR --> R[Prompt assembly]
- R --> S[LLMService.call_llm]
- S --> T[Structured Markdown notes]
+	M_OCR --> R[Prompt assembly]
+	R --> S[LLMService.call_llm]
+	S --> T[Structured Markdown Meeting Notes]
 
- T --> U[NotesService.build_html_notes]
- M --> U
- U --> V[HTML report]
+	T --> U[NotesService.build_html_notes]
+	M --> U
+	U --> V[Rendered Meeting Notes]
 
- T --> W[Save minutes markdown in artifacts/meeting_minutes]
- V --> X[Return preview and downloadable HTML]
- T --> CTX["Build session MeetingContext (gr.State)"]
- M_OCR --> CTX
- QY --> CTX
+	T --> W[Save Meeting Notes markdown in artifacts/meeting_minutes]
+	V --> X[Rendered Meeting Notes, Markdown, and Download HTML]
+	T --> CTX["Build session MeetingContext (gr.State)"]
+	M_OCR --> CTX
+	QY --> CTX
 
- CTX --> CHAT[Chat with Meeting Tab]
- D --> CHAT
- CHAT --> QA_CALL[PipelineService.query_meeting_safe]
- QA_CALL --> QA_LLM[Grounded multi-turn LLM Q&A with length-retry & CoT stripping]
- QA_LLM --> CHAT
+	CTX --> CHAT[Meeting Chat Tab]
+	D --> CHAT
+	CHAT --> QA_CALL[PipelineService.query_meeting_safe]
+	QA_CALL --> QA_LLM[Grounded multi-turn LLM Q&A with length-retry & CoT stripping]
+	QA_LLM --> CHAT
 ```
 
 ### Component Responsibilities
@@ -100,11 +101,12 @@ flowchart TD
 | `main.py` | Application entrypoint; bootstraps runtime and launches the Gradio UI. |
 | `mcp_server.py` | FastMCP server exposing tools and resources over stdio or SSE. |
 | `meeting_notes/bootstrap.py` | Environment setup, `.env` parsing, telemetry suppression, and proxy configuration. |
-| `meeting_notes/ui.py` | Gradio interface layout, session-isolated `gr.State` management, **Chat with Meeting** Q&A tab, event binding, and reactive capture recommendation hints. |
+| `meeting_notes/views.py` | Pure presentation view helpers and `ResultsPaneState` state transitions (Provider chip, empty state, stage progress, error banners, and starter questions). |
+| `meeting_notes/ui.py` | Gradio interface layout, theme configuration, Provider status chip, stage progress tracking, session-isolated `gr.State` management, and **Meeting Chat**. |
 | `meeting_notes/pipeline.py` | End-to-end orchestration, parallel visual/audio branch execution, upload deduplication, `MeetingContext` construction, grounded multi-turn Q&A (`query_meeting` / `query_meeting_safe`), token budgeting, and fallback management. |
-| `meeting_notes/video.py` | Video metadata probing, screenshot sampling, concurrent `ffmpeg` audio windowing, native Google Gemini (`google-genai`) and OpenAI-compatible transcription routing, audio-track detection, and boundary text deduplication. |
+| `meeting_notes/video.py` | Video metadata probing, Screenshot sampling, concurrent `ffmpeg` audio windowing, native Google Gemini (`google-genai`) and OpenAI-compatible transcription routing, audio-track detection, and boundary text deduplication. |
 | `meeting_notes/llm.py` | Unified client wrapper for OpenAI-compatible chat, vision, batch, and transcription endpoints with reasoning control. |
-| `meeting_notes/notes.py` | Markdown parsing, image embedding, template rendering, and HTML report generation. |
+| `meeting_notes/notes.py` | Markdown parsing, Screenshot embedding, template rendering, and HTML Meeting Notes generation. |
 
 ---
 
@@ -116,7 +118,7 @@ meeting-notes-generator/
 │   └── workflows/
 │       └── ci.yml              # GitHub Actions CI (pytest + Docker build & compose check)
 ├── artifacts/                  # Generated runtime artifacts (git-ignored)
-│   ├── meeting_minutes/        # Markdown minutes (*.minutes.md)
+│   ├── meeting_minutes/        # Markdown Meeting Notes (*.minutes.md)
 │   ├── transcripts/            # Chunk transcripts, full text, and manifests
 │   └── uploads/                # Staged uploads and .upload_index.json
 ├── docs/                       # Technical documentation and ADRs
@@ -125,22 +127,29 @@ meeting-notes-generator/
 │   ├── __init__.py
 │   ├── bootstrap.py            # Runtime configuration and environment loading
 │   ├── llm.py                  # LLM, Batch, and Audio client service
-│   ├── notes.py                # Markdown to HTML report generator
-│   ├── pipeline.py             # Main processing pipeline & Meeting Q&A service
-│   ├── ui.py                   # Gradio Web UI definition & Q&A chat wiring
-│   └── video.py                # Video extraction, Gemini/OpenAI audio transcription
+│   ├── notes.py                # Markdown to HTML Meeting Notes generator
+│   ├── pipeline.py             # Main processing pipeline & Meeting Chat service
+│   ├── ui.py                   # Gradio Web UI definition & Meeting Chat wiring
+│   ├── video.py                # Video extraction, Gemini/OpenAI audio transcription
+│   └── views.py                # Pure presentation view helpers & ResultsPaneState
 ├── specs/                      # Feature specifications
-│   └── meeting-qa-chatbot.md   # Meeting Q&A Chatbot specification
-├── tests/                      # Automated test suite (160+ tests)
+│   ├── meeting-qa-chatbot.md   # Meeting Q&A Chatbot specification
+│   └── polished-ui.md          # Polished UI specification
+├── tests/                      # Automated test suite (290+ tests)
 │   ├── conftest.py
 │   ├── test_e2e_pipeline.py
 │   ├── test_llm_reasoning_control.py
 │   ├── test_llm_service.py
+│   ├── test_m4_empirical_challenge.py
 │   ├── test_mcp_server.py
 │   ├── test_meeting_qa_chatbot.py
 │   ├── test_meeting_qa_lifecycle.py
 │   ├── test_meeting_qa_resilience.py
-│   └── test_video_service.py
+│   ├── test_terminology.py
+│   ├── test_ui_handlers.py
+│   ├── test_video_service.py
+│   └── test_views.py
+├── GLOSSARY.md                 # Domain glossary for UI & docs
 ├── .dockerignore
 ├── .env.example                # Template for environment configuration
 ├── .gitignore
@@ -280,33 +289,35 @@ docker run -p 7860:7860 --env-file .env -v $(pwd)/artifacts:/app/artifacts meeti
 
 ## How to Use the Web UI
 
-1. **Verify Connection**:
-   - In the **LLM Provider Settings** accordion, confirm your Base URL, API Key, Model, and Reasoning effort.
-   - Click **Test Connection** to ensure the model responds.
-2. **Upload Recording or Transcript**:
-   - **Video Recording**: Upload a video (`.mp4`, `.mov`, `.mkv`). The app analyzes video duration and automatically recommends optimal screenshot capture intervals and limits.
-   - **Transcript File**: Upload an existing transcript (`.txt`, `.md`, `.rtf`). Skips video, OCR, and audio transcription stages entirely.
-3. **Configure Note Generation**:
-   - Select **Notes style**:
+1. **Verify Provider Connection**:
+   - Check the **Provider** status chip above the settings: it shows `Connected: <model>` when configured or `Not configured` if an API key is missing.
+   - In the **Provider Settings** accordion (which auto-collapses when configured, or opens highlighted when unconfigured), confirm your Base URL, API Key, Model, and Reasoning effort.
+   - Click **Test Connection** to verify connectivity; the status chip updates immediately.
+2. **Add a Recording or Transcript**:
+   - **Recording**: Add a meeting video file (`.mp4`, `.mov`, `.mkv`, etc.). The app analyzes duration and automatically recommends optimal Screenshot capture intervals and max Screenshots based on payload budget.
+   - **Transcript**: Optionally add a text transcript (`.txt`, `.md`, `.rtf`). Skips Screenshot extraction, OCR, and audio transcription stages entirely.
+3. **Configure Meeting Notes**:
+   - Select **Notes Style**:
      - *Executive Summary*: High-level summary, key decisions, and prioritized actions.
      - *Detailed Notes*: In-depth topical discussion breakdown and full context.
      - *Action Items Focus*: Dedicated action items grouped by owner and urgency.
      - *Technical Minutes*: Structured formal minutes with agenda, technical specifications, and motions.
-   - Select **Output language** (English, Simplified Chinese, Traditional Chinese, Japanese, Korean, French, German, Spanish, etc.).
-4. **Generate Notes**:
+   - Select **Meeting Notes language** (English, Spanish, French, German, Japanese, Chinese, Portuguese, Korean, etc.).
+4. **Generate Meeting Notes**:
    - Click **Generate Meeting Notes**.
-   - Monitor real-time status and preview:
-     - **Captured Screenshots**: Extracted slide images.
-     - **Markdown Notes**: Rendered markdown minutes.
-     - **HTML Preview**: Interactive report preview with inline images.
-     - **Download**: Export the standalone HTML report for sharing.
+   - Monitor real-time progress: the app displays named stages (**Extracting Screenshots**, **Transcribing**, **Summarizing**, **Done**) alongside an elapsed-time indicator.
+   - If an error occurs, an actionable dismissible error banner identifies the cause (e.g. invalid key, missing FFmpeg, payload size) and suggests a fix.
+   - Review generated results:
+     - **Screenshots**: Extracted presentation Screenshots.
+     - **Rendered Meeting Notes**: The primary rendered HTML view post-generation, complete with **Copy Markdown** and **Download HTML** quick-share buttons.
+     - **Markdown**: Secondary tab containing raw Markdown Meeting Notes for editing or inspection.
   ![notes_demo](./docs/notes_demo.png)
-5. **Chat with Meeting (Follow-up Q&A)**:
-   - Open the **Chat with Meeting** tab once meeting notes generation completes.
-   - Ask multi-turn follow-up questions about specific discussion details, speaker statements, action items, or slide OCR text. Answers are grounded in the session's generated minutes, transcript (or map-reduce digest), and frame OCR/timestamp metadata.
+5. **Ask Questions in Meeting Chat**:
+   - Switch to the **Meeting Chat** tab once Meeting Notes generation completes.
+   - Click starter question chips (e.g. *"What were the action items?"*, *"Who owns what?"*) to prefill the question input without auto-sending, or type your own question grounded in the Meeting Notes, Transcript, and Screenshot OCR/timestamp metadata.
    ![chat_demo](./docs/chat_demo.png)
-   - You can change the **Model**, **Reasoning effort**, or **Output language** dropdowns between turns to adjust how subsequent questions are answered.
-   - Click **Clear Chat** to start a fresh line of questioning while keeping the current meeting notes and context intact, or click **Reset** (or generate notes on a new recording) to clear the session and bind to a new meeting.
+   - You can change the **Model**, **Reasoning effort**, or **Meeting Notes language** dropdowns between turns to adjust how subsequent questions are answered.
+   - Click **Clear Chat** to clear the conversation history while keeping the current Meeting Notes and context intact, or **Reset** to clear all inputs, notes, error banners, and chat history back to the friendly initial empty state (*"Add a Recording or Transcript to begin"*).
 
 ---
 
@@ -409,7 +420,7 @@ Add the following to your `claude_desktop_config.json`:
 
 ## Testing & CI
 
-The project contains a 160+ test suite covering the end-to-end pipeline, native Gemini and OpenAI-compatible video chunk transcription, Meeting Q&A chatbot grounding/lifecycle/resilience, LLM reasoning handling, and MCP integration without requiring network access:
+The project contains a 290+ test suite covering the end-to-end pipeline, native Gemini and OpenAI-compatible video chunk transcription, Meeting Chat grounding/lifecycle/resilience, UI view-builders and handlers, LLM reasoning handling, and MCP integration without requiring network access:
 
 ```bash
 # Run all tests using uv
