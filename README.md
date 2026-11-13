@@ -33,70 +33,70 @@ It also provides a first-class **Model Context Protocol (MCP)** server, enabling
 
 ```mermaid
 flowchart TD
-	A[main.py] --> B[setup_runtime_environment]
-	B --> C[MeetingNotesApp]
-	C --> D[Gradio UI]
+ A[main.py] --> B[setup_runtime_environment]
+ B --> C[MeetingNotesApp]
+ C --> D[Gradio UI]
 
-	D --> E[Test Connection]
-	E --> F[LLMService.test_connection]
-	F --> G[OpenAI-compatible endpoint]
+ D --> E[Test Connection]
+ E --> F[LLMService.test_connection]
+ F --> G[OpenAI-compatible endpoint]
 
-	D --> H[Generate Meeting Notes]
-	H --> I[PipelineService.run_pipeline_safe]
-	I --> J[Resolve uploaded filepath & validate transcription config]
-	J --> K[Stage stable copy in artifacts/uploads]
-	K --> L[VideoService.get_video_info]
-	L --> P_SPLIT{Parallel Visual & Audio Branches}
-	P_SPLIT -->|Visual Worker| M[VideoService.extract_frames]
-	M --> M_OCR[Concurrent Frame OCR]
-	P_SPLIT -->|Audio Worker| N[VideoService.transcribe_video_chunked]
+ D --> H[Generate Meeting Notes]
+ H --> I[PipelineService.run_pipeline_safe]
+ I --> J[Resolve uploaded filepath & validate transcription config]
+ J --> K[Stage stable copy in artifacts/uploads]
+ K --> L[VideoService.get_video_info]
+ L --> P_SPLIT{Parallel Visual & Audio Branches}
+ P_SPLIT -->|Visual Worker| M[VideoService.extract_frames]
+ M --> M_OCR[Concurrent Frame OCR]
+ P_SPLIT -->|Audio Worker| N[VideoService.transcribe_video_chunked]
 
-	N --> O[Plan overlapped chunk windows & verify audio track]
-	O --> P_BACKEND{Transcribe Model Type?}
-	P_BACKEND -->|gemini-*| P_GEM["Concurrent ffmpeg slice + Google GenAI Files & Interactions API (diarization + timestamps)"]
-	P_BACKEND -->|OpenAI-compatible| P_OAI["Concurrent ffmpeg slice + OpenAI /audio/transcriptions"]
-	P_GEM --> QX[Merge neighbouring chunk text with boundary dedupe]
-	P_OAI --> QX
-	QX --> QY[Transcript files and manifest in artifacts/transcripts]
-	QY --> QA{Transcript length > threshold?}
-	QA -->|No| R
-	QA -->|Yes| QB{Batch map-reduce enabled?}
-	QB -->|Yes| QC[Build map JSONL requests]
-	QC --> QD[Upload batch input file /v1/files]
-	QD --> QE[Create batch job /v1/batches]
-	QE --> QF[Poll batch status and fetch output file]
-	QF --> QG{Batch map succeeded?}
-	QG -->|Yes| QH[Batch reduce: merge segment summaries]
-	QG -->|No| QI[Sync fallback map-reduce]
-	QB -->|No| QI
-	QH --> R
-	QI --> R
+ N --> O[Plan overlapped chunk windows & verify audio track]
+ O --> P_BACKEND{Transcribe Model Type?}
+ P_BACKEND -->|gemini-*| P_GEM["Concurrent ffmpeg slice + Google GenAI Files & Interactions API (diarization + timestamps)"]
+ P_BACKEND -->|OpenAI-compatible| P_OAI["Concurrent ffmpeg slice + OpenAI /audio/transcriptions"]
+ P_GEM --> QX[Merge neighbouring chunk text with boundary dedupe]
+ P_OAI --> QX
+ QX --> QY[Transcript files and manifest in artifacts/transcripts]
+ QY --> QA{Transcript length > threshold?}
+ QA -->|No| R
+ QA -->|Yes| QB{Batch map-reduce enabled?}
+ QB -->|Yes| QC[Build map JSONL requests]
+ QC --> QD[Upload batch input file /v1/files]
+ QD --> QE[Create batch job /v1/batches]
+ QE --> QF[Poll batch status and fetch output file]
+ QF --> QG{Batch map succeeded?}
+ QG -->|Yes| QH[Batch reduce: merge segment summaries]
+ QG -->|No| QI[Sync fallback map-reduce]
+ QB -->|No| QI
+ QH --> R
+ QI --> R
 
-	M_OCR --> R[Prompt assembly]
-	R --> S[LLMService.call_llm]
-	S --> T[Structured Markdown notes]
+ M_OCR --> R[Prompt assembly]
+ R --> S[LLMService.call_llm]
+ S --> T[Structured Markdown notes]
 
-	T --> U[NotesService.build_html_notes]
-	M --> U
-	U --> V[HTML report]
+ T --> U[NotesService.build_html_notes]
+ M --> U
+ U --> V[HTML report]
 
-	T --> W[Save minutes markdown in artifacts/meeting_minutes]
-	V --> X[Return preview and downloadable HTML]
-	T --> CTX["Build session MeetingContext (gr.State)"]
-	M_OCR --> CTX
-	QY --> CTX
+ T --> W[Save minutes markdown in artifacts/meeting_minutes]
+ V --> X[Return preview and downloadable HTML]
+ T --> CTX["Build session MeetingContext (gr.State)"]
+ M_OCR --> CTX
+ QY --> CTX
 
-	CTX --> CHAT[Chat with Meeting Tab]
-	D --> CHAT
-	CHAT --> QA_CALL[PipelineService.query_meeting_safe]
-	QA_CALL --> QA_LLM[Grounded multi-turn LLM Q&A with length-retry & CoT stripping]
-	QA_LLM --> CHAT
+ CTX --> CHAT[Chat with Meeting Tab]
+ D --> CHAT
+ CHAT --> QA_CALL[PipelineService.query_meeting_safe]
+ QA_CALL --> QA_LLM[Grounded multi-turn LLM Q&A with length-retry & CoT stripping]
+ QA_LLM --> CHAT
 ```
 
 ### Component Responsibilities
 
 | Component | Responsibility |
-|---|---|
+| --- | --- |
 | `main.py` | Application entrypoint; bootstraps runtime and launches the Gradio UI. |
 | `mcp_server.py` | FastMCP server exposing tools and resources over stdio or SSE. |
 | `meeting_notes/bootstrap.py` | Environment setup, `.env` parsing, telemetry suppression, and proxy configuration. |
@@ -208,7 +208,7 @@ Edit `.env` with your provider details. All settings can also be overridden or e
 ### Common Environment Variables
 
 | Variable | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL for OpenAI-compatible chat API (falls back to `OPENAI_BASE_URL`). |
 | `LLM_API_KEY` | *(empty)* | API key for chat completion endpoint (falls back to `OPENAI_API_KEY`). |
 | `LLM_MODEL` | `gpt-4o-mini` | Chat model ID used for meeting notes generation and Q&A chat. |
@@ -227,7 +227,7 @@ Edit `.env` with your provider details. All settings can also be overridden or e
 | `LLM_NOTES_MAP_REDUCE_SEGMENT_CHARS` | `12000` | Segment length for map-reduce chunking. |
 | `LLM_NOTES_USE_BATCH_MAP_REDUCE` | `false` | Enable asynchronous OpenAI Batch API for map-reduce (`/v1/files` + `/v1/batches`). |
 | `LLM_NOTES_LENGTH_RETRY_ENABLED` | `true` | Retry once with enlarged token budget when output ends with `finish_reason="length"`. |
-| `LLM_NOTES_FALLBACK_MODEL` | _(unset — disabled)_ | Fallback model invoked if the primary model produces no visible output. No hardcoded default; set it in `.env` to enable. |
+| `LLM_NOTES_FALLBACK_MODEL` | *(unset — disabled)* | Fallback model invoked if the primary model produces no visible output. No hardcoded default; set it in `.env` to enable. |
 | `LLM_MAX_CHAT_REQUEST_BYTES` | `10485760` (10 MiB) | Maximum payload budget used to recommend screenshot capture frequency and bound Q&A grounding context. |
 
 ---
@@ -250,21 +250,23 @@ The Gradio web interface will open at `http://127.0.0.1:7860` (or the next avail
 
 Preconfigured Docker configurations allow running without local Python/FFmpeg installation.
 
-#### Start the Gradio Web UI:
+#### Start the Gradio Web UI
 
 ```bash
 docker compose up -d
 ```
+
 Access the application at `http://localhost:7860`. Artifacts and uploaded files are persisted to `./artifacts`.
 
-#### Start the MCP Server (SSE Transport):
+#### Start the MCP Server (SSE Transport)
 
 ```bash
 docker compose --profile mcp up -d
 ```
+
 Runs the MCP server over Server-Sent Events (SSE) on `http://localhost:8000/sse`.
 
-#### Custom Docker Build:
+#### Custom Docker Build
 
 ```bash
 # Build image
@@ -298,9 +300,11 @@ docker run -p 7860:7860 --env-file .env -v $(pwd)/artifacts:/app/artifacts meeti
      - **Markdown Notes**: Rendered markdown minutes.
      - **HTML Preview**: Interactive report preview with inline images.
      - **Download**: Export the standalone HTML report for sharing.
+  ![notes_demo](./docs/notes_demo.png)
 5. **Chat with Meeting (Follow-up Q&A)**:
    - Open the **Chat with Meeting** tab once meeting notes generation completes.
    - Ask multi-turn follow-up questions about specific discussion details, speaker statements, action items, or slide OCR text. Answers are grounded in the session's generated minutes, transcript (or map-reduce digest), and frame OCR/timestamp metadata.
+   ![chat_demo](./docs/chat_demo.png)
    - You can change the **Model**, **Reasoning effort**, or **Output language** dropdowns between turns to adjust how subsequent questions are answered.
    - Click **Clear Chat** to start a fresh line of questioning while keeping the current meeting notes and context intact, or click **Reset** (or generate notes on a new recording) to clear the session and bind to a new meeting.
 
@@ -323,7 +327,7 @@ uv run python mcp_server.py --sse
 ### Available Tools
 
 | Tool | Parameters | Description |
-|---|---|---|
+| --- | --- | --- |
 | `test_llm_connection` | `base_url`, `api_key`, `model`, `reasoning_effort` | Verifies endpoint connectivity and model reachability. |
 | `generate_meeting_notes` | `video_path`, `transcript_path`, `notes_style`, `output_language`, `interval_seconds`, `max_frames`, `base_url`, `api_key`, `model`, `reasoning_effort` | Runs the full pipeline from video or transcript and generates HTML and Markdown artifacts. |
 | `list_meeting_minutes` | *(none)* | Returns a list of all saved meeting minutes artifacts with modification timestamps. |
@@ -335,7 +339,7 @@ uv run python mcp_server.py --sse
 ### Available Resources
 
 | Resource URI | Description |
-|---|---|
+| --- | --- |
 | `meeting-notes://minutes/latest` | Text resource containing the latest generated Markdown meeting minutes. |
 | `meeting-notes://minutes/list` | JSON resource containing the list of available meeting minutes files. |
 | `meeting-notes://config/status` | Current environment configuration status (masked API keys, loaded providers). |
@@ -387,16 +391,16 @@ Add the following to your `claude_desktop_config.json`:
 ## Provider Compatibility Matrix
 
 | Provider | Base URL | Chat | Vision (Screenshots/OCR) | `/audio/transcriptions` | Batch API |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | **OpenAI** | `https://api.openai.com/v1` | Yes | Yes | Yes | Yes |
 | **Azure OpenAI** | `https://<resource>.openai.azure.com/openai/v1` | Yes | Yes | Yes | Yes |
 | **Groq** | `https://api.groq.com/openai/v1` | Yes | Model-dependent | Yes (`whisper-large-v3`) | Yes |
 | **OpenRouter** | `https://openrouter.ai/api/v1` | Yes | Model-dependent | No | No |
 | **Google Gemini** | `https://generativelanguage.googleapis.com/v1beta/openai` | Yes | Yes | Native via `google-genai` (`gemini-3.5-transcribe`) | No |
 | **DeepSeek** | `https://api.deepseek.com/v1` | Yes | No | No | No |
-| **Moonshot (Kimi)**| `https://api.moonshot.ai/v1` | Yes | Model-dependent | No | No |
+| **Moonshot (Kimi)** | `https://api.moonshot.ai/v1` | Yes | Model-dependent | No | No |
 | **Ollama (local)** | `http://localhost:11434/v1` | Yes | Model-dependent | No | No |
-| **LM Studio / vLLM**| `http://localhost:1234/v1` / `http://localhost:8000/v1`| Yes | Model-dependent | vLLM only | No |
+| **LM Studio / vLLM** | `http://localhost:1234/v1` / `http://localhost:8000/v1` | Yes | Model-dependent | vLLM only | No |
 
 > [!TIP]
 > For audio transcription, you can use native Google GenAI transcription with `LLM_TRANSCRIBE_MODEL=gemini-3.5-transcribe` (using `GEMINI_API_KEY` or `GOOGLE_API_KEY`), or set `LLM_TRANSCRIBE_BASE_URL` and `LLM_TRANSCRIBE_API_KEY` to an OpenAI-compatible audio provider (such as Groq Whisper or OpenAI), or supply a transcript file directly.
