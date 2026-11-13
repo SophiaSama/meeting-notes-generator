@@ -73,27 +73,6 @@ flowchart TD
  QH --> R
  QI --> R
 
-<<<<<<< HEAD
- M_OCR --> R[Prompt assembly]
- R --> S[LLMService.call_llm]
- S --> T[Structured Markdown notes]
-
- T --> U[NotesService.build_html_notes]
- M --> U
- U --> V[HTML report]
-
- T --> W[Save minutes markdown in artifacts/meeting_minutes]
- V --> X[Return preview and downloadable HTML]
- T --> CTX["Build session MeetingContext (gr.State)"]
- M_OCR --> CTX
- QY --> CTX
-
- CTX --> CHAT[Chat with Meeting Tab]
- D --> CHAT
- CHAT --> QA_CALL[PipelineService.query_meeting_safe]
- QA_CALL --> QA_LLM[Grounded multi-turn LLM Q&A with length-retry & CoT stripping]
- QA_LLM --> CHAT
-=======
 	M_OCR --> R[Prompt assembly]
 	R --> S[LLMService.call_llm]
 	S --> T[Structured Markdown Meeting Notes]
@@ -113,7 +92,6 @@ flowchart TD
 	CHAT --> QA_CALL[PipelineService.query_meeting_safe]
 	QA_CALL --> QA_LLM[Grounded multi-turn LLM Q&A with length-retry & CoT stripping]
 	QA_LLM --> CHAT
->>>>>>> b8503e1 (feat: polish full-width responsive UI, ResultsPaneState, and docs)
 ```
 
 ### Component Responsibilities
@@ -327,32 +305,19 @@ docker run -p 7860:7860 --env-file .env -v $(pwd)/artifacts:/app/artifacts meeti
    - Select **Meeting Notes language** (English, Spanish, French, German, Japanese, Chinese, Portuguese, Korean, etc.).
 4. **Generate Meeting Notes**:
    - Click **Generate Meeting Notes**.
-<<<<<<< HEAD
-   - Monitor real-time status and preview:
-     - **Captured Screenshots**: Extracted slide images.
-     - **Markdown Notes**: Rendered markdown minutes.
-     - **HTML Preview**: Interactive report preview with inline images.
-     - **Download**: Export the standalone HTML report for sharing.
-  ![notes_demo](./docs/notes_demo.png)
-5. **Chat with Meeting (Follow-up Q&A)**:
-   - Open the **Chat with Meeting** tab once meeting notes generation completes.
-   - Ask multi-turn follow-up questions about specific discussion details, speaker statements, action items, or slide OCR text. Answers are grounded in the session's generated minutes, transcript (or map-reduce digest), and frame OCR/timestamp metadata.
-   ![chat_demo](./docs/chat_demo.png)
-   - You can change the **Model**, **Reasoning effort**, or **Output language** dropdowns between turns to adjust how subsequent questions are answered.
-   - Click **Clear Chat** to start a fresh line of questioning while keeping the current meeting notes and context intact, or click **Reset** (or generate notes on a new recording) to clear the session and bind to a new meeting.
-=======
    - Monitor real-time progress: the app displays named stages (**Extracting Screenshots**, **Transcribing**, **Summarizing**, **Done**) alongside an elapsed-time indicator.
    - If an error occurs, an actionable dismissible error banner identifies the cause (e.g. invalid key, missing FFmpeg, payload size) and suggests a fix.
    - Review generated results:
      - **Screenshots**: Extracted presentation Screenshots.
      - **Rendered Meeting Notes**: The primary rendered HTML view post-generation, complete with **Copy Markdown** and **Download HTML** quick-share buttons.
      - **Markdown**: Secondary tab containing raw Markdown Meeting Notes for editing or inspection.
+  ![notes_demo](./docs/notes_demo.png)
 5. **Ask Questions in Meeting Chat**:
    - Switch to the **Meeting Chat** tab once Meeting Notes generation completes.
    - Click starter question chips (e.g. *"What were the action items?"*, *"Who owns what?"*) to prefill the question input without auto-sending, or type your own question grounded in the Meeting Notes, Transcript, and Screenshot OCR/timestamp metadata.
+   ![chat_demo](./docs/chat_demo.png)
    - You can change the **Model**, **Reasoning effort**, or **Meeting Notes language** dropdowns between turns to adjust how subsequent questions are answered.
    - Click **Clear Chat** to clear the conversation history while keeping the current Meeting Notes and context intact, or **Reset** to clear all inputs, notes, error banners, and chat history back to the friendly initial empty state (*"Add a Recording or Transcript to begin"*).
->>>>>>> b8503e1 (feat: polish full-width responsive UI, ResultsPaneState, and docs)
 
 ---
 
