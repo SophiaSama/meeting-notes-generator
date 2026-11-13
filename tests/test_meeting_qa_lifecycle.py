@@ -74,6 +74,11 @@ def test_consecutive_generations_replace_context_and_clear_chat_with_zero_bleed(
         ctx_a,
         chat_hist_a,
         chat_in_a,
+        empty_up_a,
+        results_up_a,
+        error_up_a,
+        starter_up_a,
+        _stage_progress_u,
     ) = app._on_generate_click(
         None,
         PROXY_ARGS["base_url"],
@@ -92,6 +97,10 @@ def test_consecutive_generations_replace_context_and_clear_chat_with_zero_bleed(
     assert "Project Phoenix" in ctx_a["transcript_evidence"]
     assert chat_hist_a == []
     assert chat_in_a == ""
+    assert empty_up_a.get("visible") is False
+    assert results_up_a.get("visible") is True
+    assert error_up_a.get("visible") is False
+    assert starter_up_a.get("visible") is True
 
     # Ask a question on Meeting A to populate chat history.
     chat_hist_after_q1, cleared_input = app._on_chat_submit(
@@ -116,6 +125,11 @@ def test_consecutive_generations_replace_context_and_clear_chat_with_zero_bleed(
         ctx_b,
         chat_hist_b,
         chat_in_b,
+        empty_up_b,
+        results_up_b,
+        error_up_b,
+        starter_up_b,
+        _stage_progress_u,
     ) = app._on_generate_click(
         None,
         PROXY_ARGS["base_url"],
@@ -133,6 +147,10 @@ def test_consecutive_generations_replace_context_and_clear_chat_with_zero_bleed(
     assert ctx_b is not ctx_a
     assert chat_hist_b == []
     assert chat_in_b == ""
+    assert empty_up_b.get("visible") is False
+    assert results_up_b.get("visible") is True
+    assert error_up_b.get("visible") is False
+    assert starter_up_b.get("visible") is True
     assert "Project Nebula" in ctx_b["markdown_notes"]
     assert "Project Nebula" in ctx_b["transcript_evidence"]
     assert "Project Phoenix" not in ctx_b["markdown_notes"]
@@ -224,7 +242,7 @@ def test_consecutive_video_runs_replace_frame_ocr_and_transcript_context(
     pipeline.llm_service.call_llm = fake_call_llm
 
     active_video["tag"] = "alpha"
-    _, _, _, _, ctx_a, _, _ = app._on_generate_click(
+    _, _, _, _, ctx_a, _, _, _, _, _, _, _ = app._on_generate_click(
         str(video_a),
         PROXY_ARGS["base_url"],
         PROXY_ARGS["api_key"],
@@ -237,7 +255,7 @@ def test_consecutive_video_runs_replace_frame_ocr_and_transcript_context(
     assert "Alpha Slide: SLA 99.5%" in ctx_a["frames_metadata"][0]["ocr_text"]
 
     active_video["tag"] = "beta"
-    _, _, _, _, ctx_b, chat_hist_b, _ = app._on_generate_click(
+    _, _, _, _, ctx_b, chat_hist_b, _, _, _, _, _, _ = app._on_generate_click(
         str(video_b),
         PROXY_ARGS["base_url"],
         PROXY_ARGS["api_key"],
@@ -289,19 +307,34 @@ def test_clear_chat_resets_only_conversation_and_input_while_preserving_context(
 
     pipeline.llm_service.call_llm = fake_call_llm
 
-    thumbnails, notes_text, html_notes, out_path, meeting_context, chat_history, chat_input = (
-        app._on_generate_click(
-            None,
-            PROXY_ARGS["base_url"],
-            PROXY_ARGS["api_key"],
-            PROXY_ARGS["model"],
-            interval_seconds=30,
-            max_frames=8,
-            notes_style="Executive Summary",
-            output_language="English",
-            transcript_file=str(transcript_path),
-        )
+    (
+        thumbnails,
+        notes_text,
+        html_notes,
+        out_path,
+        meeting_context,
+        chat_history,
+        chat_input,
+        empty_update,
+        results_update,
+        error_update,
+        starter_update,
+        stage_progress_update,
+    ) = app._on_generate_click(
+        None,
+        PROXY_ARGS["base_url"],
+        PROXY_ARGS["api_key"],
+        PROXY_ARGS["model"],
+        interval_seconds=30,
+        max_frames=8,
+        notes_style="Executive Summary",
+        output_language="English",
+        transcript_file=str(transcript_path),
     )
+    assert empty_update.get("visible") is False
+    assert results_update.get("visible") is True
+    assert error_update.get("visible") is False
+    assert starter_update.get("visible") is True
 
     # First turn builds history.
     chat_history, chat_input = app._on_chat_submit(
@@ -364,7 +397,7 @@ def test_global_reset_clears_context_and_blocks_subsequent_queries_without_llm_c
         encoding="utf-8",
     )
 
-    _, _, _, _, meeting_context, chat_history, _ = app._on_generate_click(
+    _, _, _, _, meeting_context, chat_history, _, _, _, _, _, _ = app._on_generate_click(
         None,
         PROXY_ARGS["base_url"],
         PROXY_ARGS["api_key"],
@@ -389,9 +422,9 @@ def test_global_reset_clears_context_and_blocks_subsequent_queries_without_llm_c
     assert len(chat_history) == 2
     calls_before_reset = len(pipeline.llm_service.calls)
 
-    # Global Reset clears all 11 outputs including meeting_context, chatbot, and chat_input.
+    # Global Reset clears all 15 outputs including meeting_context, chatbot, and chat_input.
     reset_outputs = app._on_reset()
-    assert len(reset_outputs) == 11
+    assert len(reset_outputs) == 16
     (
         video_val,
         transcript_val,
@@ -404,6 +437,11 @@ def test_global_reset_clears_context_and_blocks_subsequent_queries_without_llm_c
         reset_meeting_context,
         reset_chatbot,
         reset_chat_input,
+        reset_empty_state,
+        reset_results,
+        reset_error_banner,
+        reset_starter_row,
+        reset_stage_progress,
     ) = reset_outputs
 
     assert video_val is None
@@ -417,6 +455,11 @@ def test_global_reset_clears_context_and_blocks_subsequent_queries_without_llm_c
     assert reset_meeting_context is None
     assert reset_chatbot == []
     assert reset_chat_input == ""
+    assert reset_empty_state.get("visible") is True
+    assert reset_results.get("visible") is False
+    assert reset_error_banner.get("visible") is False
+    assert reset_error_banner.get("value") == ""
+    assert reset_starter_row.get("visible") is False
 
     # Attempting to query after Reset triggers the missing-context guardrail without calling the LLM.
     with pytest.raises(gr.Error, match="generate meeting notes first"):
@@ -464,7 +507,7 @@ def test_failed_subsequent_generation_clears_stale_meeting_context_and_chat_hist
         encoding="utf-8",
     )
 
-    _, _, _, _, ctx_a, chat_hist_a, _ = app._on_generate_click(
+    _, _, _, _, ctx_a, chat_hist_a, _, _, _, _, _, _ = app._on_generate_click(
         None,
         PROXY_ARGS["base_url"],
         PROXY_ARGS["api_key"],
@@ -494,7 +537,20 @@ def test_failed_subsequent_generation_clears_stale_meeting_context_and_chat_hist
 
     pipeline.llm_service.call_llm = failing_llm
 
-    thumbnails_b, notes_b, html_b, out_b, ctx_b, chat_hist_b, chat_in_b = app._on_generate_click(
+    (
+        thumbnails_b,
+        notes_b,
+        html_b,
+        out_b,
+        ctx_b,
+        chat_hist_b,
+        chat_in_b,
+        empty_up_b,
+        results_up_b,
+        error_up_b,
+        starter_up_b,
+        _stage_progress_u,
+    ) = app._on_generate_click(
         None,
         PROXY_ARGS["base_url"],
         PROXY_ARGS["api_key"],
@@ -507,12 +563,17 @@ def test_failed_subsequent_generation_clears_stale_meeting_context_and_chat_hist
     )
 
     assert thumbnails_b == []
-    assert "Generation failed" in notes_b
-    assert "Generation failed" in html_b
+    assert notes_b == ""
+    assert html_b == ""
     assert out_b is None
     assert ctx_b is None
     assert chat_hist_b == []
     assert chat_in_b == ""
+    assert empty_up_b.get("visible") is True
+    assert results_up_b.get("visible") is False
+    assert error_up_b.get("visible") is True
+    assert "error-banner" in error_up_b.get("value", "")
+    assert starter_up_b.get("visible") is False
 
     # Subsequent chat submission with the resulting ctx_b must trigger the missing-context guardrail.
     guardrail_history, _ = app._on_chat_submit(
@@ -670,6 +731,11 @@ def test_ui_lifecycle_event_wiring_preserves_notes_on_clear_chat_and_resets_all_
         app.meeting_context_state._id,
         app.chatbot._id,
         app.chat_input._id,
+        app.empty_state_container._id,
+        app.results_container._id,
+        app.error_banner._id,
+        app.starter_row._id,
+        app.stage_progress_html._id,
     ]
 
     reset_fn = _find_block_fn("_on_reset")
@@ -685,4 +751,9 @@ def test_ui_lifecycle_event_wiring_preserves_notes_on_clear_chat_and_resets_all_
         app.meeting_context_state._id,
         app.chatbot._id,
         app.chat_input._id,
+        app.empty_state_container._id,
+        app.results_container._id,
+        app.error_banner._id,
+        app.starter_row._id,
+        app.stage_progress_html._id,
     ]
