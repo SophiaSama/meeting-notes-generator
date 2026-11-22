@@ -145,6 +145,7 @@ class NotesService:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{title} - Meeting Notes</title>
   <style>{build_export_css()}</style>
 </head>

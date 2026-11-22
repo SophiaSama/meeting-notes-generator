@@ -552,3 +552,54 @@ def test_theme_visual_styling_populated_results(
         assert errors == []
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_art_themes_are_distinct_in_light_and_dark_mode(
+    live_server_url: str,
+    browser: Any,
+    mode: str,
+) -> None:
+    """Every art theme must produce distinct computed colors in both light and dark modes."""
+    from meeting_notes.themes import THEMES
+
+    context = browser.new_context(color_scheme=mode)
+    try:
+        page = context.new_page()
+        page.goto(live_server_url, wait_until="domcontentloaded")
+        page.locator("#theme-toggle-btn").wait_for(state="visible", timeout=15_000)
+
+        seen_styles: dict[str, tuple[str, str, str, str]] = {}
+        for tid, theme in THEMES.items():
+            page.locator(".art-theme-dd input").first.click()
+            page.get_by_role("option", name=theme.label, exact=True).click()
+            page.wait_for_function(
+                "(expected) => document.body.getAttribute('data-art-theme') === expected",
+                arg=tid,
+                timeout=5_000,
+            )
+            style = page.evaluate(
+                """() => [
+                    getComputedStyle(document.body).backgroundColor,
+                    getComputedStyle(document.querySelector('.provider-accordion')).backgroundColor,
+                    getComputedStyle(document.querySelector('button.primary')).backgroundColor,
+                    getComputedStyle(document.querySelector('h1')).color,
+                ]"""
+            )
+            sig = tuple(style)
+            assert sig not in seen_styles.values(), (
+                f"{tid} in {mode} mode rendered identically to another theme: {seen_styles}"
+            )
+            seen_styles[tid] = sig
+
+        # Verify persistence across reload for the last selected theme
+        last_tid = list(THEMES)[-1]
+        page.reload(wait_until="domcontentloaded")
+        page.locator("#theme-toggle-btn").wait_for(state="visible", timeout=15_000)
+        page.wait_for_function(
+            "(expected) => document.body.getAttribute('data-art-theme') === expected",
+            arg=last_tid,
+            timeout=5_000,
+        )
+    finally:
+        context.close()
