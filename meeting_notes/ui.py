@@ -12,6 +12,13 @@ import gradio as gr
 from .llm import REASONING_EFFORT_CHOICES, LLMService
 from .notes import NotesService
 from .pipeline import PipelineService
+from .themes import (
+    APPLY_THEME_JS,
+    DEFAULT_THEME,
+    RESTORE_THEME_JS,
+    build_ui_css,
+    theme_choices,
+)
 from .video import VideoService
 from .views import (
     STARTER_QUESTIONS,
@@ -27,12 +34,14 @@ from .views import (
     reset_results_pane,
 )
 
+ART_THEME_CSS = build_ui_css()
+
 THEME = gr.themes.Default(
     primary_hue="blue",
     neutral_hue="slate",
 )
 
-CSS = """
+CSS = ART_THEME_CSS + """
 html body {
     max-width: 100% !important;
     width: 100% !important;
@@ -58,6 +67,7 @@ html body {
 .title-row > .title-heading h1 {
     margin: 0 !important;
 }
+.art-theme-dd { min-width: 240px; flex: 0 0 auto !important; }
 .theme-toggle-btn {
     width: fit-content !important;
     flex: 0 0 auto !important;
@@ -1128,6 +1138,16 @@ class MeetingNotesApp:
                     ),
                     elem_classes=["provider-chip-container"],
                 )
+                art_theme_dd = gr.Dropdown(
+                    choices=theme_choices(),
+                    value=DEFAULT_THEME,
+                    label="Visual Theme",
+                    show_label=False,
+                    container=False,
+                    scale=0,
+                    min_width=240,
+                    elem_classes=["art-theme-dd"],
+                )
                 theme_toggle_btn = gr.Button(
                     "☀️ Light",
                     size="sm",
@@ -1385,6 +1405,19 @@ class MeetingNotesApp:
                 inputs=[],
                 outputs=[],
                 js=INIT_THEME_JS,
+            )
+            self.art_theme_dd = art_theme_dd
+            art_theme_dd.change(
+                None,
+                inputs=[art_theme_dd],
+                outputs=[],
+                js=APPLY_THEME_JS,
+            )
+            demo.load(
+                None,
+                inputs=[],
+                outputs=[art_theme_dd],
+                js=RESTORE_THEME_JS,
             )
             theme_toggle_btn.click(
                 None,

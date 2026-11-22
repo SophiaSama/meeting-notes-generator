@@ -4,6 +4,14 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from meeting_notes.themes import (
+    DEFAULT_THEME,
+    THEME_ATTR,
+    build_export_css,
+    build_export_picker_html,
+    get_theme,
+)
+
 
 class NotesService:
     STYLE_GUIDES = {
@@ -104,7 +112,15 @@ class NotesService:
         body = re.sub(r"@@SCREENSHOT_\d+@@", "", body)
         return body
 
-    def build_html_notes(self, markdown_notes: str, frames: list[dict], info: dict, model: str) -> str:
+    def build_html_notes(
+        self,
+        markdown_notes: str,
+        frames: list[dict],
+        info: dict,
+        model: str,
+        theme: str = DEFAULT_THEME,
+    ) -> str:
+        theme_id = get_theme(theme).id
         title = info["filename"].rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
         now = datetime.now().strftime("%B %d, %Y %H:%M")
 
@@ -129,28 +145,12 @@ class NotesService:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{title} - Meeting Notes</title>
-  <style>
-    body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 820px;
-            margin: 2rem auto; padding: 0 1.5rem; line-height: 1.75; color: #1a1a1a; }}
-    h1   {{ font-size: 24px; font-weight: 600; margin-bottom: 4px; }}
-    h2   {{ font-size: 16px; font-weight: 600; margin: 1.75rem 0 6px;
-            text-transform: uppercase; letter-spacing: .05em; color: #444; }}
-    .meta  {{ font-size: 12px; color: #888; margin-bottom: 1.75rem;
-              padding-bottom: 1rem; border-bottom: 1px solid #eee; }}
-    ul   {{ padding-left: 1.4rem; }} li {{ margin-bottom: 4px; }}
-    blockquote {{ border-left: 3px solid #ddd; margin: 1rem 0;
-                  padding: .5rem 1rem; color: #555; background: #fafafa; }}
-    strong {{ font-weight: 600; }}
-    .screenshot {{ margin: 1.25rem 0; border-radius: 8px; overflow: hidden;
-                   border: 1px solid #e5e5e5; }}
-    .screenshot img {{ width: 100%; max-height: 260px; object-fit: cover; display: block; }}
-    .screenshot figcaption {{ font-size: 12px; color: #888; padding: 6px 12px;
-                               background: #f8f8f8; }}
-    p {{ margin-bottom: .75rem; }}
-  </style>
+  <style>{build_export_css()}</style>
 </head>
-<body>
+<body {THEME_ATTR}="{theme_id}">
+  {build_export_picker_html(theme_id)}
   <h1>{title}</h1>
   <div class="meta">
     Generated {now} &nbsp;.&nbsp; Model: {model}
