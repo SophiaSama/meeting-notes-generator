@@ -116,14 +116,24 @@ def _wait_for_theme(page: Any, expected_theme: str) -> None:
     )
 
     page.wait_for_function(
-        """([expectDark, expectedLabel]) => {
+        """([expectDark, expectedTheme, expectedLabel, expectedAriaLabel]) => {
             const rootDark = document.documentElement.classList.contains('dark');
             const bodyDark = document.body && document.body.classList.contains('dark');
+            const colorScheme = document.documentElement.style.colorScheme;
             const btn = document.querySelector('#theme-toggle-btn');
             const text = btn ? btn.textContent.trim() : '';
-            return rootDark === expectDark && bodyDark === expectDark && text === expectedLabel;
+            const ariaPressed = btn ? btn.getAttribute('aria-pressed') : null;
+            const ariaLabel = btn ? btn.getAttribute('aria-label') : null;
+            return (
+                rootDark === expectDark &&
+                bodyDark === expectDark &&
+                colorScheme === expectedTheme &&
+                text === expectedLabel &&
+                ariaPressed === String(expectDark) &&
+                ariaLabel === expectedAriaLabel
+            );
         }""",
-        arg=[expect_dark, expected_label],
+        arg=[expect_dark, expected_theme, expected_label, expected_aria_label],
         timeout=10_000,
     )
 
