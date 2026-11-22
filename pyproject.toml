@@ -24,6 +24,7 @@ include = ["meeting_notes*"]
 
 [dependency-groups]
 dev = [
+    "playwright>=1.65.2",
     "pytest>=8.0.0",
 ]
 
@@ -33,4 +34,5 @@ pythonpath = ["."]
 addopts = "-ra"
 markers = [
     "e2e: end-to-end pipeline tests (no network; external boundaries faked)",
+    "playwright: live browser E2E tests via Playwright",
 ]

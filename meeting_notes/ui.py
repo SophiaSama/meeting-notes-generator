@@ -45,13 +45,23 @@ html body {
 .title-row {
     margin-bottom: .25rem;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
 }
+.title-row > .title-heading {
+    flex: 1 1 0% !important;
+    width: auto !important;
+    min-width: min(220px, 100%) !important;
+}
+.title-row > .title-heading h1 {
+    margin: 0 !important;
+}
 .theme-toggle-btn {
     width: fit-content !important;
     flex: 0 0 auto !important;
+    min-width: 0 !important;
     white-space: nowrap !important;
 }
 .chat-input-row {
@@ -75,6 +85,7 @@ html body {
 }
 @media (max-width: 900px) {
     .gradio-container { padding-left: 12px !important; padding-right: 12px !important; }
+    .title-row { gap: 8px; }
     .main-row { flex-direction: column !important; }
     .main-row > .column { min-width: 100% !important; width: 100% !important; }
     .generate-btn {
@@ -86,7 +97,13 @@ html body {
 }
 /* Provider Status Chip */
 .provider-chip-container {
-    margin-bottom: 8px;
+    margin-bottom: 0 !important;
+    flex: 0 0 auto !important;
+    width: fit-content !important;
+    min-width: 0 !important;
+}
+.title-row > .provider-chip-container .html-container {
+    padding: 0 !important;
 }
 .provider-chip {
     display: inline-flex;
@@ -105,9 +122,9 @@ html body {
     border: 1px solid rgba(16, 185, 129, 0.3);
 }
 :root.dark .provider-chip.connected, .dark .provider-chip.connected {
-    background: rgba(16, 185, 129, 0.2);
-    color: #6ee7b7;
-    border-color: rgba(16, 185, 129, 0.4);
+    background: rgba(16, 185, 129, 0.2) !important;
+    color: #6ee7b7 !important;
+    border-color: rgba(16, 185, 129, 0.4) !important;
 }
 .provider-chip.connected .provider-chip-dot {
     width: 8px;
@@ -180,12 +197,38 @@ html body {
 /* Quick Share Row in Rendered Notes */
 .share-actions-row {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: 8px;
     margin-bottom: 8px;
     justify-content: flex-end;
 }
+.share-actions-row > button,
+.share-actions-row > a {
+    flex: 0 0 auto !important;
+    width: fit-content !important;
+    min-width: 0 !important;
+}
 .results-container {
     width: 100%;
+}
+/* Screenshots Gallery */
+.screenshots-gallery,
+.screenshots-gallery .gallery-container,
+.screenshots-gallery .grid-wrap,
+.screenshots-gallery .grid-container,
+.screenshots-gallery .empty {
+    background: var(--block-background-fill) !important;
+    color: var(--body-text-color) !important;
+}
+.screenshots-gallery .thumbnail-item {
+    background: var(--background-fill-secondary) !important;
+    border-color: var(--border-color-primary) !important;
+}
+.screenshots-gallery .caption-label {
+    background: var(--background-fill-secondary) !important;
+    color: var(--body-text-color) !important;
+    border-color: var(--border-color-primary) !important;
 }
 .rendered-notes-html {
     background: var(--background-fill-primary) !important;
@@ -218,37 +261,60 @@ html body {
     background: var(--background-fill-secondary) !important;
     color: var(--body-text-color-subdued) !important;
 }
-/* Stage Progress Indicator */
+/* Stage Progress Card */
 .stage-progress-container {
+    width: 100%;
     margin-bottom: 8px;
 }
 .stage-progress {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 14px;
-    border-radius: 9999px;
-    font-size: 13px;
-    font-weight: 500;
-    line-height: 1.4;
     background: var(--background-fill-secondary);
     color: var(--body-text-color);
     border: 1px solid var(--border-color-primary, #cbd5e1);
+    border-radius: var(--block-radius, 8px);
+    padding: 18px 20px;
+    width: 100%;
+    box-sizing: border-box;
     margin-bottom: 8px;
 }
+:root.dark .stage-progress, .dark .stage-progress {
+    border-color: var(--border-color-primary, #475569);
+}
 .stage-progress.stage-done {
-    background: rgba(16, 185, 129, 0.12);
-    color: #065f46;
-    border-color: rgba(16, 185, 129, 0.3);
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.35);
 }
 :root.dark .stage-progress.stage-done, .dark .stage-progress.stage-done {
-    background: rgba(16, 185, 129, 0.2);
-    color: #6ee7b7;
-    border-color: rgba(16, 185, 129, 0.4);
+    background: rgba(16, 185, 129, 0.14) !important;
+    border-color: rgba(16, 185, 129, 0.4) !important;
+}
+.stage-progress-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-bottom: 12px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--border-color-primary, #cbd5e1);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.4;
+}
+:root.dark .stage-progress-header, .dark .stage-progress-header {
+    border-bottom-color: var(--border-color-primary, #475569);
+}
+.stage-name {
+    color: var(--body-text-color);
+}
+.stage-progress.stage-done .stage-name {
+    color: #065f46;
+}
+:root.dark .stage-progress.stage-done .stage-name,
+.dark .stage-progress.stage-done .stage-name {
+    color: #6ee7b7 !important;
 }
 .stage-spinner {
-    width: 12px;
-    height: 12px;
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
     border: 2px solid var(--color-accent);
     border-top-color: transparent;
     border-radius: 50%;
@@ -258,12 +324,151 @@ html body {
     to { transform: rotate(360deg); }
 }
 .stage-check {
-    font-weight: bold;
+    font-weight: 700;
+    font-size: 15px;
+    line-height: 1;
     color: #10b981;
+    flex-shrink: 0;
 }
 .stage-elapsed {
+    margin-left: auto;
     color: var(--body-text-color-subdued);
-    font-size: 12px;
+    font-size: 12.5px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.stage-steps {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+    list-style: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+.stage-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color-primary, #cbd5e1);
+    background: var(--background-fill-primary);
+    font-size: 12.5px;
+    line-height: 1.3;
+    min-width: 0;
+    list-style: none !important;
+    margin: 0 !important;
+}
+:root.dark .stage-step, .dark .stage-step {
+    border-color: var(--border-color-primary, #475569);
+}
+.stage-step-indicator {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 11px;
+    font-weight: 600;
+}
+.stage-step-label {
+    color: var(--body-text-color);
+    font-weight: 500;
+    overflow-wrap: anywhere;
+}
+.stage-step-completed {
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.35);
+}
+:root.dark .stage-step-completed, .dark .stage-step-completed {
+    background: rgba(16, 185, 129, 0.16) !important;
+    border-color: rgba(16, 185, 129, 0.4) !important;
+}
+.stage-step-completed .stage-step-indicator {
+    background: #10b981;
+    color: #ffffff;
+}
+.stage-step-active {
+    background: rgba(59, 130, 246, 0.08);
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.15);
+}
+:root.dark .stage-step-active, .dark .stage-step-active {
+    background: rgba(59, 130, 246, 0.16) !important;
+}
+.stage-step-active .stage-step-indicator {
+    border: 2px solid var(--color-accent);
+    background: transparent;
+}
+.stage-step-active .stage-step-label {
+    font-weight: 600;
+}
+.stage-step-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    animation: stage-pulse 1.4s ease-in-out infinite;
+}
+@keyframes stage-pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(0.7); opacity: 0.5; }
+}
+.stage-step-pending {
+    opacity: 0.72;
+}
+.stage-step-pending .stage-step-indicator {
+    border: 1px solid var(--border-color-primary, #cbd5e1);
+    color: var(--body-text-color-subdued);
+}
+:root.dark .stage-step-pending .stage-step-indicator,
+.dark .stage-step-pending .stage-step-indicator {
+    border-color: var(--border-color-primary, #475569);
+}
+.stage-step-pending .stage-step-label {
+    color: var(--body-text-color-subdued);
+}
+.stage-step-skipped {
+    border-style: dashed;
+    opacity: 0.65;
+}
+.stage-step-skipped .stage-step-indicator {
+    border: 1px dashed var(--border-color-primary, #cbd5e1);
+    color: var(--body-text-color-subdued);
+}
+:root.dark .stage-step-skipped .stage-step-indicator,
+.dark .stage-step-skipped .stage-step-indicator {
+    border-color: var(--border-color-primary, #475569);
+}
+.stage-step-skipped .stage-step-label {
+    color: var(--body-text-color-subdued);
+}
+.stage-step-badge {
+    margin-left: auto;
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 9999px;
+    background: var(--background-fill-secondary);
+    color: var(--body-text-color-subdued);
+    border: 1px solid var(--border-color-primary, #cbd5e1);
+    white-space: nowrap;
+}
+:root.dark .stage-step-badge, .dark .stage-step-badge {
+    border-color: var(--border-color-primary, #475569);
+}
+@media (max-width: 900px) {
+    .stage-steps {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+@media (max-width: 520px) {
+    .stage-steps {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* Actionable Error Banner */
@@ -277,9 +482,9 @@ html body {
     gap: 12px;
     padding: 12px 16px;
     border-radius: var(--block-radius, 8px);
-    background: #fef2f2 !important;
-    border: 1px solid #f87171 !important;
-    color: #7f1d1d !important;
+    background: #fef2f2;
+    border: 1px solid #f87171;
+    color: #7f1d1d;
     box-sizing: border-box;
     width: 100%;
     margin-bottom: 12px;
@@ -289,7 +494,7 @@ html body {
     transition: opacity 0.2s ease-in-out;
 }
 .error-banner * {
-    color: #7f1d1d !important;
+    color: #7f1d1d;
 }
 :root.dark .error-banner, .dark .error-banner {
     background: #3b1219 !important;
@@ -393,14 +598,67 @@ html body {
 footer      { display: none !important; }
 """
 
+THEME_HEAD_HTML = """<script>
+(() => {
+    try {
+        const saved = localStorage.getItem('meeting-notes-theme');
+        if (saved === 'dark' || saved === 'light') {
+            document.documentElement.classList.toggle('dark', saved === 'dark');
+            document.documentElement.style.colorScheme = saved;
+        }
+    } catch (e) {}
+})();
+</script>"""
+
+INIT_THEME_JS = """() => {
+    const KEY = 'meeting-notes-theme';
+    const apply = (isDark) => {
+        document.documentElement.classList.toggle('dark', isDark);
+        if (document.body) document.body.classList.toggle('dark', isDark);
+        document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+        const btn = document.querySelector('#theme-toggle-btn') || document.querySelector('.theme-toggle-btn');
+        if (btn) {
+            btn.textContent = isDark ? '🌙 Dark' : '☀️ Light';
+            btn.setAttribute('aria-pressed', String(isDark));
+            btn.setAttribute('aria-label', isDark ? 'Theme: Dark (switch to Light)' : 'Theme: Light (switch to Dark)');
+        }
+    };
+    let saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) {}
+    const isDark = saved === 'dark'
+        ? true
+        : saved === 'light'
+            ? false
+            : (document.documentElement.classList.contains('dark')
+                || (document.body && document.body.classList.contains('dark'))
+                || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches));
+    apply(isDark);
+    if (!window.__meetingNotesThemeSyncBound) {
+        window.__meetingNotesThemeSyncBound = true;
+        window.addEventListener('storage', (ev) => {
+            if (ev.key === KEY && (ev.newValue === 'dark' || ev.newValue === 'light')) {
+                apply(ev.newValue === 'dark');
+            }
+        });
+    }
+}"""
+
 TOGGLE_THEME_JS = """() => {
-    const root = document.documentElement;
-    const body = document.body;
-    const isDark = root.classList.contains('dark') || body.classList.contains('dark');
-    root.classList.toggle('dark', !isDark);
-    body.classList.toggle('dark', !isDark);
-}
-"""
+    const KEY = 'meeting-notes-theme';
+    const isDark = document.documentElement.classList.contains('dark')
+        || (document.body && document.body.classList.contains('dark'));
+    const nextDark = !isDark;
+    document.documentElement.classList.toggle('dark', nextDark);
+    if (document.body) document.body.classList.toggle('dark', nextDark);
+    document.documentElement.style.colorScheme = nextDark ? 'dark' : 'light';
+    try { localStorage.setItem(KEY, nextDark ? 'dark' : 'light'); } catch (e) {}
+    const btn = document.querySelector('#theme-toggle-btn') || document.querySelector('.theme-toggle-btn');
+    if (btn) {
+        btn.textContent = nextDark ? '🌙 Dark' : '☀️ Light';
+        btn.setAttribute('aria-pressed', String(nextDark));
+        btn.setAttribute('aria-label', nextDark ? 'Theme: Dark (switch to Light)' : 'Theme: Light (switch to Dark)');
+    }
+}"""
 
 COPY_MARKDOWN_JS = """(text) => {
     if (!text) return;
@@ -479,7 +737,11 @@ class StageProgressTracker:
 
         time_str = format_elapsed_time(elapsed)
         formatted_desc = f"{stage} ({time_str})"
-        self.last_html = format_stage_progress(stage, elapsed)
+        self.last_html = format_stage_progress(
+            stage,
+            elapsed,
+            transcript_only=self.is_transcript_only,
+        )
 
         self.history.append({
             "fraction": fraction,
@@ -585,14 +847,56 @@ class MeetingNotesApp:
             return None
         return max(1, round(sum(sizes) / len(sizes)))
 
-    def _on_video_input_change(self, video_path):
+    @staticmethod
+    def _should_hide_capture_controls(video_path, transcript_file) -> bool:
+        """Hide capture sliders and hint iff a Transcript is present and Recording is absent."""
+        return bool(transcript_file) and not bool(video_path)
+
+    def _on_video_input_change(self, video_path, transcript_file=None):
         """Handle upload updates in one callback to avoid extra duplicate work."""
+        hide_controls = self._should_hide_capture_controls(video_path, transcript_file)
         duplicate_banner_update = self.pipeline_service.check_upload_for_duplicate(video_path)
         if isinstance(duplicate_banner_update, dict) and duplicate_banner_update.get("visible"):
-            return gr.update(), gr.update(), gr.update(value="", visible=False), duplicate_banner_update
+            return (
+                gr.update(visible=not hide_controls),
+                gr.update(visible=not hide_controls),
+                gr.update(value="", visible=False),
+                duplicate_banner_update,
+            )
+
+        if hide_controls:
+            return (
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(value="", visible=False),
+                duplicate_banner_update,
+            )
 
         interval_update, max_frames_update, capture_hint_update = self._suggest_capture_settings(video_path)
+        if isinstance(interval_update, dict):
+            interval_update = {**interval_update, "visible": True}
+        else:
+            interval_update = gr.update(visible=True)
+        if isinstance(max_frames_update, dict):
+            max_frames_update = {**max_frames_update, "visible": True}
+        else:
+            max_frames_update = gr.update(visible=True)
         return interval_update, max_frames_update, capture_hint_update, duplicate_banner_update
+
+    def _on_transcript_input_change(self, video_path, transcript_file):
+        """Toggle capture control visibility on Transcript changes without re-sampling video."""
+        if self._should_hide_capture_controls(video_path, transcript_file):
+            return (
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(value="", visible=False),
+            )
+        hint_update = gr.update() if video_path else gr.update(value="", visible=False)
+        return (
+            gr.update(visible=True),
+            gr.update(visible=True),
+            hint_update,
+        )
 
     def _on_test_connection(
         self,
@@ -635,10 +939,31 @@ class MeetingNotesApp:
 
     @classmethod
     def _on_generate_start(cls, video_file=None, transcript_file=None):
-        """Switch results pane into the generating state with stage progress HTML."""
+        """Switch results pane into generating state and lock Generate Meeting Notes button."""
         state = begin_generation(is_transcript_only=bool(transcript_file and not video_file))
         empty_u, results_u, error_u, _starter_u, stage_u = cls._adapt_results_updates(state)
-        return empty_u, results_u, error_u, stage_u
+        return (
+            empty_u,
+            results_u,
+            error_u,
+            stage_u,
+            gr.update(value="Generating...", interactive=False),
+        )
+
+    @staticmethod
+    def _on_generate_finish(thumbnails):
+        """Re-enable Generate button and show Screenshots tab only when screenshots exist."""
+        has_screenshots = bool(thumbnails)
+        return (
+            gr.update(value="Generate Meeting Notes", interactive=True),
+            gr.update(visible=has_screenshots),
+            gr.update(selected="rendered-notes") if not has_screenshots else gr.update(),
+        )
+
+    @staticmethod
+    def _sync_screenshots_tab(thumbnails):
+        """Confirm Screenshots tab button visibility after TabItem mounts in Gradio 6."""
+        return gr.update(visible=bool(thumbnails))
 
     def _on_generate_click(
         self,
@@ -767,6 +1092,17 @@ class MeetingNotesApp:
         )
 
     @staticmethod
+    def _on_reset_controls():
+        """Restore Generate button, hide Screenshots tab, select Rendered Meeting Notes, and restore capture sliders."""
+        return (
+            gr.update(value="Generate Meeting Notes", interactive=True),
+            gr.update(visible=False),
+            gr.update(selected="rendered-notes"),
+            gr.update(value=30, visible=True),
+            gr.update(value=8, visible=True),
+        )
+
+    @staticmethod
     def find_available_port(start: int = 7860, end: int = 7870, host: str = "127.0.0.1") -> int:
         for port in range(start, end + 1):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -782,27 +1118,27 @@ class MeetingNotesApp:
             meeting_context_state = gr.State(value=None)
             self.meeting_context_state = meeting_context_state
 
+            is_configured = bool(self.defaults.api_key and self.defaults.api_key.strip())
             with gr.Row(elem_classes="title-row"):
-                gr.Markdown("# Meeting Notes Helper")
+                gr.Markdown("# Meeting Notes Helper", elem_classes=["title-heading"])
+                provider_status_chip = gr.HTML(
+                    value=render_provider_chip(
+                        is_configured=is_configured,
+                        model=self.defaults.model,
+                    ),
+                    elem_classes=["provider-chip-container"],
+                )
                 theme_toggle_btn = gr.Button(
-                    "Theme: Light / Dark",
+                    "☀️ Light",
                     size="sm",
                     variant="secondary",
                     scale=0,
+                    elem_id="theme-toggle-btn",
                     elem_classes=["theme-toggle-btn"],
                 )
             gr.Markdown(
                 "Add a Recording or a Transcript -> generate structured Meeting Notes via any OpenAI-compatible model.",
                 elem_classes="subtitle",
-            )
-
-            is_configured = bool(self.defaults.api_key and self.defaults.api_key.strip())
-            provider_status_chip = gr.HTML(
-                value=render_provider_chip(
-                    is_configured=is_configured,
-                    model=self.defaults.model,
-                ),
-                elem_classes=["provider-chip-container"],
             )
 
             accordion_classes = ["provider-accordion"]
@@ -890,7 +1226,7 @@ class MeetingNotesApp:
                             step=1,
                             label="Max screenshots",
                         )
-                    capture_hint = gr.HTML(visible=False)
+                    capture_hint = gr.HTML(visible="hidden")
                     with gr.Row():
                         notes_style_dd = gr.Dropdown(
                             choices=list(self.notes_service.STYLE_GUIDES.keys()),
@@ -916,15 +1252,15 @@ class MeetingNotesApp:
                     reset_btn = gr.Button("Reset", variant="secondary")
 
                 with gr.Column(scale=2):
-                    dup_banner = gr.HTML(visible=False)
+                    dup_banner = gr.HTML(visible="hidden")
                     error_banner = gr.HTML(
                         value="",
-                        visible=False,
+                        visible="hidden",
                         elem_classes=["error-banner-container"],
                     )
                     stage_progress_html = gr.HTML(
                         value="",
-                        visible=False,
+                        visible="hidden",
                         elem_classes=["stage-progress-container"],
                     )
                     empty_state_container = gr.HTML(
@@ -933,35 +1269,39 @@ class MeetingNotesApp:
                         elem_classes=["results-empty-state-wrapper"],
                     )
                     with gr.Column(visible="hidden", elem_classes=["results-container"]) as results_container:
-                        screenshots_gallery = gr.Gallery(
-                            label="Screenshots",
-                            columns=4,
-                            height=220,
-                            show_label=True,
-                        )
-                        with gr.Tabs():
-                            with gr.TabItem("Rendered Meeting Notes"):
+                        with gr.Tabs() as results_tabs:
+                            with gr.TabItem("Rendered Meeting Notes", id="rendered-notes"):
                                 with gr.Row(elem_classes=["share-actions-row"]):
                                     copy_md_btn = gr.Button(
                                         "Copy Markdown",
                                         elem_classes=["copy-md-btn", "copy-markdown-btn"],
                                         size="sm",
+                                        scale=0,
                                     )
                                     download_btn = gr.DownloadButton(
                                         "Download HTML",
                                         value=None,
                                         elem_classes=["download-btn"],
                                         size="sm",
+                                        scale=0,
                                     )
                                 html_notes = gr.HTML(label="Rendered Meeting Notes", elem_classes=["rendered-notes-html"])
-                            with gr.TabItem("Markdown"):
+                            with gr.TabItem("Markdown", id="markdown-notes"):
                                 notes_text = gr.Textbox(
                                     label="",
                                     lines=20,
                                     buttons=["copy"],
                                     elem_classes="note-box",
                                 )
-                            with gr.TabItem("Meeting Chat"):
+                            with gr.TabItem("Screenshots", id="screenshots-tab", visible=False) as screenshots_tab:
+                                screenshots_gallery = gr.Gallery(
+                                    label="Screenshots",
+                                    columns=4,
+                                    height="auto",
+                                    show_label=False,
+                                    elem_classes=["screenshots-gallery"],
+                                )
+                            with gr.TabItem("Meeting Chat", id="meeting-chat"):
                                 chatbot = gr.Chatbot(
                                     label="Meeting Chat",
                                     height="48vh",
@@ -1004,6 +1344,10 @@ class MeetingNotesApp:
 
             self.video_input = video_input
             self.transcript_input = transcript_input
+            self.interval_slider = interval_slider
+            self.max_frames_slider = max_frames_slider
+            self.results_tabs = results_tabs
+            self.screenshots_tab = screenshots_tab
             self.screenshots_gallery = screenshots_gallery
             self.notes_text = notes_text
             self.notes_output = notes_text
@@ -1036,6 +1380,12 @@ class MeetingNotesApp:
             self.test_result = test_result
 
             self.theme_toggle_btn = theme_toggle_btn
+            demo.load(
+                None,
+                inputs=[],
+                outputs=[],
+                js=INIT_THEME_JS,
+            )
             theme_toggle_btn.click(
                 None,
                 inputs=[],
@@ -1058,6 +1408,7 @@ class MeetingNotesApp:
                     results_container,
                     error_banner,
                     stage_progress_html,
+                    generate_btn,
                 ],
                 show_progress="hidden",
             ).then(
@@ -1088,6 +1439,16 @@ class MeetingNotesApp:
                     starter_row,
                     stage_progress_html,
                 ],
+            ).then(
+                self._on_generate_finish,
+                inputs=[screenshots_gallery],
+                outputs=[generate_btn, screenshots_tab, results_tabs],
+                show_progress="hidden",
+            ).then(
+                self._sync_screenshots_tab,
+                inputs=[screenshots_gallery],
+                outputs=[screenshots_tab],
+                show_progress="hidden",
             )
 
             chat_inputs = [
@@ -1118,8 +1479,14 @@ class MeetingNotesApp:
 
             video_input.change(
                 self._on_video_input_change,
-                inputs=[video_input],
+                inputs=[video_input, transcript_input],
                 outputs=[interval_slider, max_frames_slider, capture_hint, dup_banner],
+                show_progress="hidden",
+            )
+            transcript_input.change(
+                self._on_transcript_input_change,
+                inputs=[video_input, transcript_input],
+                outputs=[interval_slider, max_frames_slider, capture_hint],
                 show_progress="hidden",
             )
 
@@ -1144,6 +1511,17 @@ class MeetingNotesApp:
                     starter_row,
                     stage_progress_html,
                 ],
+            ).then(
+                self._on_reset_controls,
+                inputs=[],
+                outputs=[
+                    generate_btn,
+                    screenshots_tab,
+                    results_tabs,
+                    interval_slider,
+                    max_frames_slider,
+                ],
+                show_progress="hidden",
             )
 
         return demo
@@ -1154,6 +1532,7 @@ class MeetingNotesApp:
         self.demo.launch(
             css=CSS,
             theme=THEME,
+            head=THEME_HEAD_HTML,
             server_name=server_name,
             server_port=server_port,
             share=False,

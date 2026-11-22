@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 import pytest
 
 from meeting_notes.views import (
@@ -361,3 +362,137 @@ class TestResultsPaneStateMachine:
         assert format_elapsed_time(0.0) == "0s"
         assert format_elapsed_time(59.4) == "59s"
         assert format_elapsed_time(65.0) == "1m 05s"
+
+    def test_screenshots_visible_across_all_phases(self):
+        assert reset_results_pane().screenshots_visible is False
+        assert begin_generation(is_transcript_only=False).screenshots_visible is False
+
+        tx_state = begin_generation(is_transcript_only=True)
+        assert tx_state.screenshots_visible is False
+        assert 'data-stage="Extracting Screenshots" data-state="skipped"' in tx_state.stage_html
+        assert 'data-stage="Transcribing" data-state="skipped"' in tx_state.stage_html
+
+        pop_with_shots = complete_generation(
+            ["shot1.png"], "# Notes", "<p>Notes</p>", "out.html", {"k": "v"}
+        )
+        assert pop_with_shots.screenshots_visible is True
+
+        pop_no_shots = complete_generation(
+            [], "# Notes", "<p>Notes</p>", "out.html", {"k": "v"}
+        )
+        assert pop_no_shots.screenshots_visible is False
+
+        assert fail_generation("Error: 401 Unauthorized").screenshots_visible is False
+
+
+def _extract_step_li(html_out: str, stage_name: str) -> str:
+    pattern = rf'<li\b[^>]*data-stage="{re.escape(stage_name)}"[^>]*>.*?</li>'
+    match = re.search(pattern, html_out, flags=re.DOTALL)
+    assert match is not None, f"Could not find step <li> for {stage_name!r} in:\n{html_out}"
+    return match.group(0)
+
+
+class TestFourStepProgressCard:
+    """Unit tests for the 4-step progress card rendered by format_stage_progress."""
+
+    def test_all_four_canonical_stages_rendered(self):
+        html_out = format_stage_progress("Extracting Screenshots", 0.0)
+        assert "stage-progress-card" in html_out
+        assert "stage-steps" in html_out
+        for stage in ("Extracting Screenshots", "Transcribing", "Summarizing", "Done"):
+            assert f'data-stage="{stage}"' in html_out
+            assert stage in html_out
+
+    def test_step_states_extracting_active(self):
+        html_out = format_stage_progress("Extracting Screenshots", 4.0)
+        assert "stage-spinner" in html_out
+        assert "(4s)" in html_out
+        assert "stage-done" not in html_out
+        assert "✓" not in html_out
+
+        s1 = _extract_step_li(html_out, "Extracting Screenshots")
+        s2 = _extract_step_li(html_out, "Transcribing")
+        s3 = _extract_step_li(html_out, "Summarizing")
+        s4 = _extract_step_li(html_out, "Done")
+
+        assert 'data-state="active"' in s1
+        assert 'aria-current="step"' in s1
+        assert 'data-state="pending"' in s2
+        assert 'data-state="pending"' in s3
+        assert 'data-state="pending"' in s4
+
+    def test_step_states_transcribing_active(self):
+        html_out = format_stage_progress("Transcribing", 35.0)
+        assert "(35s)" in html_out
+        assert "stage-done" not in html_out
+        assert "✓" not in html_out
+
+        s1 = _extract_step_li(html_out, "Extracting Screenshots")
+        s2 = _extract_step_li(html_out, "Transcribing")
+        s3 = _extract_step_li(html_out, "Summarizing")
+        s4 = _extract_step_li(html_out, "Done")
+
+        assert 'data-state="completed"' in s1
+        assert "stage-step-completed" in s1
+        assert "stage-step-check-icon" in s1
+        assert 'data-state="active"' in s2
+        assert 'aria-current="step"' in s2
+        assert 'data-state="pending"' in s3
+        assert 'data-state="pending"' in s4
+
+    def test_step_states_summarizing_active(self):
+        html_out = format_stage_progress("Summarizing", 90.0)
+        assert "(1m 30s)" in html_out
+        assert "stage-done" not in html_out
+        assert "✓" not in html_out
+
+        s1 = _extract_step_li(html_out, "Extracting Screenshots")
+        s2 = _extract_step_li(html_out, "Transcribing")
+        s3 = _extract_step_li(html_out, "Summarizing")
+        s4 = _extract_step_li(html_out, "Done")
+
+        assert 'data-state="completed"' in s1
+        assert 'data-state="completed"' in s2
+        assert 'data-state="active"' in s3
+        assert 'aria-current="step"' in s3
+        assert 'data-state="pending"' in s4
+
+    def test_step_states_done(self):
+        html_out = format_stage_progress("Done", 125.0)
+        assert "stage-done" in html_out
+        assert "stage-check" in html_out
+        assert "✓" in html_out
+        assert "(2m 05s)" in html_out
+        assert "stage-spinner" not in html_out
+
+        for stage in ("Extracting Screenshots", "Transcribing", "Summarizing", "Done"):
+            step_li = _extract_step_li(html_out, stage)
+            assert 'data-state="completed"' in step_li
+            assert "stage-step-check-icon" in step_li
+            assert 'aria-current="step"' not in step_li
+
+    def test_transcript_only_marks_video_stages_skipped(self):
+        active_html = format_stage_progress("Summarizing", 12.0, transcript_only=True)
+        assert "(12s)" in active_html
+        assert "✓" not in active_html
+        assert "stage-done" not in active_html
+
+        s1 = _extract_step_li(active_html, "Extracting Screenshots")
+        s2 = _extract_step_li(active_html, "Transcribing")
+        s3 = _extract_step_li(active_html, "Summarizing")
+        s4 = _extract_step_li(active_html, "Done")
+
+        assert 'data-state="skipped"' in s1
+        assert "Skipped" in s1
+        assert 'data-state="skipped"' in s2
+        assert "Skipped" in s2
+        assert 'data-state="active"' in s3
+        assert 'data-state="pending"' in s4
+
+        done_html = format_stage_progress("Done", 20.0, transcript_only=True)
+        assert "stage-done" in done_html
+        assert "✓" in done_html
+        assert 'data-state="skipped"' in _extract_step_li(done_html, "Extracting Screenshots")
+        assert 'data-state="skipped"' in _extract_step_li(done_html, "Transcribing")
+        assert 'data-state="completed"' in _extract_step_li(done_html, "Summarizing")
+        assert 'data-state="completed"' in _extract_step_li(done_html, "Done")
