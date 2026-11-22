@@ -172,8 +172,14 @@ class TestEventGraphWiring:
         assert len(clear_fn.outputs) == 2
 
         start_fn = _find_block_fn(app, "_on_generate_start")
-        assert len(start_fn.outputs) == 4
-        assert app.stage_progress_html._id in [c._id for c in start_fn.outputs]
+        assert len(start_fn.outputs) == 5
+        assert [c._id for c in start_fn.outputs] == [
+            app.empty_state_container._id,
+            app.results_container._id,
+            app.error_banner._id,
+            app.stage_progress_html._id,
+            app.generate_btn._id,
+        ]
 
         gen_fn = _find_block_fn(app, "_on_generate_click")
         assert len(gen_fn.outputs) == 12
@@ -186,6 +192,93 @@ class TestEventGraphWiring:
         assert app.error_banner._id in [c._id for c in reset_fn.outputs]
         assert app.starter_row._id in [c._id for c in reset_fn.outputs]
         assert app.stage_progress_html._id in [c._id for c in reset_fn.outputs]
+
+    def test_generate_finish_and_reset_controls_event_wiring(self):
+        """Verify chained .then handlers for _on_generate_finish and _on_reset_controls."""
+        app = MeetingNotesApp()
+
+        finish_fn = _find_block_fn(app, "_on_generate_finish")
+        assert [c._id for c in finish_fn.inputs] == [app.screenshots_gallery._id]
+        assert [c._id for c in finish_fn.outputs] == [
+            app.generate_btn._id,
+            app.screenshots_tab._id,
+            app.results_tabs._id,
+        ]
+
+        sync_fn = _find_block_fn(app, "_sync_screenshots_tab")
+        assert [c._id for c in sync_fn.inputs] == [app.screenshots_gallery._id]
+        assert [c._id for c in sync_fn.outputs] == [app.screenshots_tab._id]
+        assert app._sync_screenshots_tab(["s1.png"]).get("visible") is True
+        assert app._sync_screenshots_tab([]).get("visible") is False
+
+        reset_ctrl_fn = _find_block_fn(app, "_on_reset_controls")
+        assert reset_ctrl_fn.inputs == []
+        assert [c._id for c in reset_ctrl_fn.outputs] == [
+            app.generate_btn._id,
+            app.screenshots_tab._id,
+            app.results_tabs._id,
+            app.interval_slider._id,
+            app.max_frames_slider._id,
+        ]
+
+    def test_media_input_change_event_wiring(self):
+        """Verify both video_input.change and transcript_input.change are wired."""
+        app = MeetingNotesApp()
+
+        video_fn = _find_block_fn(app, "_on_video_input_change")
+        assert (app.video_input._id, "change") in video_fn.targets
+        assert [c._id for c in video_fn.inputs] == [
+            app.video_input._id,
+            app.transcript_input._id,
+        ]
+        assert [c._id for c in video_fn.outputs] == [
+            app.interval_slider._id,
+            app.max_frames_slider._id,
+            app.capture_hint._id,
+            app.dup_banner._id,
+        ]
+
+        tx_fn = _find_block_fn(app, "_on_transcript_input_change")
+        assert (app.transcript_input._id, "change") in tx_fn.targets
+        assert [c._id for c in tx_fn.inputs] == [
+            app.video_input._id,
+            app.transcript_input._id,
+        ]
+        assert [c._id for c in tx_fn.outputs] == [
+            app.interval_slider._id,
+            app.max_frames_slider._id,
+            app.capture_hint._id,
+        ]
+
+    def test_theme_persistence_js_and_compact_share_buttons(self):
+        """Verify inline header chip, localStorage theme load/toggle JS, Screenshots tab, and compact share buttons."""
+        from meeting_notes.ui import INIT_THEME_JS, THEME_HEAD_HTML, TOGGLE_THEME_JS
+
+        app = MeetingNotesApp()
+
+        assert app.copy_md_btn.scale == 0
+        assert app.download_btn.scale == 0
+        assert app.screenshots_tab.label == "Screenshots"
+        assert app.screenshots_tab.visible is False
+        assert app.theme_toggle_btn.value == "☀️ Light"
+
+        # Provider chip sits inline inside .title-row alongside theme_toggle_btn
+        assert app.provider_status_chip.parent is app.theme_toggle_btn.parent
+        assert "title-row" in (app.provider_status_chip.parent.elem_classes or [])
+
+        # demo.load wires localStorage restoration JS
+        load_fns = [
+            fn_obj
+            for fn_obj in app.demo.fns.values()
+            if getattr(fn_obj, "targets", None) == [(app.demo._id, "load")]
+        ]
+        assert len(load_fns) >= 1
+        assert load_fns[0].js is not None
+        assert "localStorage" in load_fns[0].js
+        assert "localStorage" in THEME_HEAD_HTML
+        assert "localStorage" in INIT_THEME_JS
+        assert "localStorage" in TOGGLE_THEME_JS
+        assert "☀️ Light" in TOGGLE_THEME_JS and "🌙 Dark" in TOGGLE_THEME_JS
 
 
 class TestResultsPaneEmptyAndPopulatedState:
@@ -406,7 +499,7 @@ class TestErrorBannerLifecycle:
     def test_error_banner_component_properties(self):
         app = MeetingNotesApp()
         assert hasattr(app, "error_banner")
-        assert app.error_banner.visible is False
+        assert app.error_banner.visible in (False, "hidden")
         assert "error-banner-container" in (app.error_banner.elem_classes or [])
 
     def test_generate_handler_known_failure_shows_actionable_banner(self):
@@ -601,15 +694,229 @@ class TestChatStarterChipsLifecycle:
 
 
     def test_generate_start_switches_to_generating_state(self):
-        """_on_generate_start hides empty/results/error and shows stage_progress_html."""
+        """_on_generate_start hides empty/results/error, shows 4-step stage card, and locks Generate button."""
         app = MeetingNotesApp()
-        empty_u, results_u, err_u, stage_u = app._on_generate_start(video_file="meeting.mp4")
+        empty_u, results_u, err_u, stage_u, btn_u = app._on_generate_start(video_file="meeting.mp4")
         assert empty_u.get("visible") is False
         assert results_u.get("visible") is False
         assert err_u.get("visible") is False
         assert stage_u.get("visible") is True
         assert "Extracting Screenshots" in stage_u.get("value", "")
+        assert "stage-progress-card" in stage_u.get("value", "")
+        assert btn_u.get("value") == "Generating..."
+        assert btn_u.get("interactive") is False
 
-        _, _, _, stage_tx = app._on_generate_start(video_file=None, transcript_file="notes.txt")
+        _, _, _, stage_tx, btn_tx = app._on_generate_start(video_file=None, transcript_file="notes.txt")
         assert stage_tx.get("visible") is True
         assert "Summarizing" in stage_tx.get("value", "")
+        assert 'data-stage="Extracting Screenshots" data-state="skipped"' in stage_tx.get("value", "")
+        assert 'data-stage="Transcribing" data-state="skipped"' in stage_tx.get("value", "")
+        assert btn_tx.get("value") == "Generating..."
+        assert btn_tx.get("interactive") is False
+
+
+class TestGenerateButtonLockAndScreenshotsTab:
+    """Test suite for button locking/unlocking and conditional Screenshots tab visibility."""
+
+    def test_initial_controls_state(self):
+        app = MeetingNotesApp()
+        assert app.generate_btn.value == "Generate Meeting Notes"
+        assert app.generate_btn.interactive is True
+        assert app.screenshots_tab.visible is False
+        assert app.interval_slider.visible is True
+        assert app.max_frames_slider.visible is True
+
+    def test_generate_finish_with_screenshots_unlocks_button_and_shows_tab(self):
+        app = MeetingNotesApp()
+        btn_u, tab_u, tabs_u = app._on_generate_finish(thumbnails=["frame_1.png", "frame_2.png"])
+        assert btn_u.get("value") == "Generate Meeting Notes"
+        assert btn_u.get("interactive") is True
+        assert tab_u.get("visible") is True
+        assert tabs_u.get("selected") is None
+
+    def test_generate_finish_without_screenshots_unlocks_button_and_hides_tab(self):
+        app = MeetingNotesApp()
+        for empty_thumbs in ([], None):
+            btn_u, tab_u, tabs_u = app._on_generate_finish(thumbnails=empty_thumbs)
+            assert btn_u.get("value") == "Generate Meeting Notes"
+            assert btn_u.get("interactive") is True
+            assert tab_u.get("visible") is False
+            assert tabs_u.get("selected") == "rendered-notes"
+
+    def test_stage_progress_tracker_passes_transcript_only_flag_to_card_html(self):
+        tracker = StageProgressTracker(progress_fn=None, is_transcript_only=True)
+        tracker(0.2, desc="Reading transcript...")
+        assert 'data-stage="Extracting Screenshots" data-state="skipped"' in tracker.last_html
+        assert 'data-stage="Transcribing" data-state="skipped"' in tracker.last_html
+        assert 'data-stage="Summarizing" data-state="active"' in tracker.last_html
+
+    def test_full_generate_chain_recording_vs_transcript_vs_error(self):
+        app = MeetingNotesApp(llm_service=FakeLLMService())
+        mock_pipeline = MagicMock()
+        app.pipeline_service = mock_pipeline
+
+        # 1. Recording run with screenshots
+        mock_pipeline.run_pipeline_safe.return_value = (
+            ["s1.png"],
+            "# Notes",
+            "<p>Notes</p>",
+            "out.html",
+            {"markdown_notes": "# Notes"},
+        )
+        mock_pipeline._is_valid_meeting_context.return_value = True
+
+        _, _, _, _, btn_start = app._on_generate_start(video_file="rec.mp4", transcript_file=None)
+        assert btn_start.get("value") == "Generating..."
+        assert btn_start.get("interactive") is False
+
+        gen_out = app._on_generate_click(
+            "rec.mp4", "https://api.openai.com/v1", "key", "model", 30, 8, "Executive Summary", "English"
+        )
+        assert len(gen_out) == 12
+        assert gen_out[0] == ["s1.png"]
+        assert gen_out[8].get("visible") is True
+
+        btn_fin, tab_fin, _tabs_fin = app._on_generate_finish(gen_out[0])
+        assert btn_fin.get("value") == "Generate Meeting Notes"
+        assert btn_fin.get("interactive") is True
+        assert tab_fin.get("visible") is True
+
+        # 2. Transcript-only run (no screenshots)
+        mock_pipeline.run_pipeline_safe.return_value = (
+            [],
+            "# Notes",
+            "<p>Notes</p>",
+            "out.html",
+            {"markdown_notes": "# Notes"},
+        )
+        _, _, _, stage_tx, btn_tx = app._on_generate_start(video_file=None, transcript_file="tx.txt")
+        assert btn_tx.get("interactive") is False
+        assert "Summarizing" in stage_tx.get("value", "")
+
+        tx_out = app._on_generate_click(
+            None, "https://api.openai.com/v1", "key", "model", 30, 8, "Executive Summary", "English",
+            transcript_file="tx.txt",
+        )
+        assert len(tx_out) == 12
+        assert tx_out[0] == []
+        assert tx_out[8].get("visible") is True
+
+        btn_tx_fin, tab_tx_fin, tabs_tx_fin = app._on_generate_finish(tx_out[0])
+        assert btn_tx_fin.get("value") == "Generate Meeting Notes"
+        assert btn_tx_fin.get("interactive") is True
+        assert tab_tx_fin.get("visible") is False
+        assert tabs_tx_fin.get("selected") == "rendered-notes"
+
+        # 3. Error run still unlocks Generate button and hides Screenshots tab
+        mock_pipeline.run_pipeline_safe.side_effect = RuntimeError("401 Unauthorized")
+        err_out = app._on_generate_click(
+            "rec.mp4", "https://api.openai.com/v1", "key", "model", 30, 8, "Executive Summary", "English"
+        )
+        assert len(err_out) == 12
+        assert err_out[0] == []
+        assert err_out[9].get("visible") is True
+
+        btn_err_fin, tab_err_fin, _ = app._on_generate_finish(err_out[0])
+        assert btn_err_fin.get("value") == "Generate Meeting Notes"
+        assert btn_err_fin.get("interactive") is True
+        assert tab_err_fin.get("visible") is False
+
+
+class TestCaptureSliderContextVisibility:
+    """Test suite for context-sensitive visibility of capture sliders and hint."""
+
+    def test_transcript_only_hides_capture_sliders_and_hint(self):
+        app = MeetingNotesApp()
+        mock_video = MagicMock()
+        app.video_service = mock_video
+
+        interval_u, max_u, hint_u, dup_u = app._on_video_input_change(None, "notes.txt")
+        assert interval_u.get("visible") is False
+        assert max_u.get("visible") is False
+        assert hint_u.get("visible") is False
+        assert hint_u.get("value") == ""
+        assert dup_u.get("visible") is False
+
+        t_interval_u, t_max_u, t_hint_u = app._on_transcript_input_change(None, "notes.txt")
+        assert t_interval_u.get("visible") is False
+        assert t_max_u.get("visible") is False
+        assert t_hint_u.get("visible") is False
+        assert t_hint_u.get("value") == ""
+        mock_video.get_video_info.assert_not_called()
+
+    def test_recording_and_transcript_restores_capture_sliders(self):
+        app = MeetingNotesApp()
+        mock_pipeline = MagicMock()
+        mock_pipeline.check_upload_for_duplicate.return_value = {"__type__": "update", "value": "", "visible": False}
+        mock_pipeline.recommend_capture_settings.return_value = {
+            "interval_seconds": 20,
+            "max_frames": 6,
+            "estimated_request_bytes": 1_048_576,
+            "budget_bytes": 10_485_760,
+        }
+        mock_video = MagicMock()
+        mock_video.get_video_info.return_value = {"duration": 120.0, "resolution": "1280x720"}
+        mock_video.format_duration.return_value = "2m 00s"
+        app.pipeline_service = mock_pipeline
+        app.video_service = mock_video
+        app._sample_average_frame_request_bytes = MagicMock(return_value=None)
+
+        interval_u, max_u, hint_u, _dup_u = app._on_video_input_change("meeting.mp4", "notes.txt")
+        assert interval_u.get("visible") is True
+        assert interval_u.get("value") == 20
+        assert max_u.get("visible") is True
+        assert max_u.get("value") == 6
+        assert hint_u.get("visible") is True
+
+        # Adding/removing Transcript while Recording is present preserves capture hint without re-running ffmpeg
+        mock_video.get_video_info.reset_mock()
+        t_interval_u, t_max_u, t_hint_u = app._on_transcript_input_change("meeting.mp4", "notes.txt")
+        assert t_interval_u.get("visible") is True
+        assert t_max_u.get("visible") is True
+        assert "visible" not in t_hint_u
+        mock_video.get_video_info.assert_not_called()
+
+    def test_clearing_transcript_restores_capture_sliders(self):
+        app = MeetingNotesApp()
+        interval_u, max_u, hint_u, dup_u = app._on_video_input_change(None, None)
+        assert interval_u.get("visible") is True
+        assert max_u.get("visible") is True
+        assert hint_u.get("visible") is False
+        assert dup_u.get("visible") is False
+
+        t_interval_u, t_max_u, t_hint_u = app._on_transcript_input_change(None, None)
+        assert t_interval_u.get("visible") is True
+        assert t_max_u.get("visible") is True
+        assert t_hint_u.get("visible") is False
+
+    def test_recording_duplicate_keeps_capture_sliders_visible(self):
+        app = MeetingNotesApp()
+        mock_pipeline = MagicMock()
+        mock_pipeline.check_upload_for_duplicate.return_value = {
+            "__type__": "update",
+            "value": "<div>Duplicate</div>",
+            "visible": True,
+        }
+        app.pipeline_service = mock_pipeline
+
+        interval_u, max_u, hint_u, dup_u = app._on_video_input_change("dup.mp4", None)
+        assert interval_u.get("visible") is True
+        assert max_u.get("visible") is True
+        assert hint_u.get("visible") is False
+        assert dup_u.get("visible") is True
+
+
+class TestResetControlsRestoration:
+    """Test suite for Reset restoring Generate button, Screenshots tab, active tab, and sliders."""
+
+    def test_on_reset_controls_restores_button_tabs_and_sliders(self):
+        app = MeetingNotesApp()
+        btn_u, tab_u, tabs_u, interval_u, max_u = app._on_reset_controls()
+        assert btn_u.get("value") == "Generate Meeting Notes"
+        assert btn_u.get("interactive") is True
+        assert tab_u.get("visible") is False
+        assert tabs_u.get("selected") == "rendered-notes"
+        assert interval_u.get("value") == 30
+        assert interval_u.get("visible") is True
+        assert max_u.get("value") == 8
+        assert max_u.get("visible") is True

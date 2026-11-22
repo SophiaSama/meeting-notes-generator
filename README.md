@@ -101,8 +101,8 @@ flowchart TD
 | `main.py` | Application entrypoint; bootstraps runtime and launches the Gradio UI. |
 | `mcp_server.py` | FastMCP server exposing tools and resources over stdio or SSE. |
 | `meeting_notes/bootstrap.py` | Environment setup, `.env` parsing, telemetry suppression, and proxy configuration. |
-| `meeting_notes/views.py` | Pure presentation view helpers and `ResultsPaneState` state transitions (Provider chip, empty state, stage progress, error banners, and starter questions). |
-| `meeting_notes/ui.py` | Gradio interface layout, theme configuration, Provider status chip, stage progress tracking, session-isolated `gr.State` management, and **Meeting Chat**. |
+| `meeting_notes/views.py` | Pure presentation view helpers and `ResultsPaneState` state transitions (Provider chip, empty state, 4-step stage progress card, `Screenshots` tab visibility, error banners, and starter questions). |
+| `meeting_notes/ui.py` | Gradio interface layout, inline header Provider status chip, `localStorage`-persisted theme toggle, stage progress tracking, context-sensitive capture controls, session-isolated `gr.State` management, and **Meeting Chat**. |
 | `meeting_notes/pipeline.py` | End-to-end orchestration, parallel visual/audio branch execution, upload deduplication, `MeetingContext` construction, grounded multi-turn Q&A (`query_meeting` / `query_meeting_safe`), token budgeting, and fallback management. |
 | `meeting_notes/video.py` | Video metadata probing, Screenshot sampling, concurrent `ffmpeg` audio windowing, native Google Gemini (`google-genai`) and OpenAI-compatible transcription routing, audio-track detection, and boundary text deduplication. |
 | `meeting_notes/llm.py` | Unified client wrapper for OpenAI-compatible chat, vision, batch, and transcription endpoints with reasoning control. |
@@ -134,8 +134,9 @@ meeting-notes-generator/
 │   └── views.py                # Pure presentation view helpers & ResultsPaneState
 ├── specs/                      # Feature specifications
 │   ├── meeting-qa-chatbot.md   # Meeting Q&A Chatbot specification
-│   └── polished-ui.md          # Polished UI specification
-├── tests/                      # Automated test suite (290+ tests)
+│   ├── polished-ui.md          # Polished UI specification
+│   └── ui-fast-wins.md         # UI fast-wins polish specification
+├── tests/                      # Automated test suite (310+ tests)
 │   ├── conftest.py
 │   ├── test_e2e_pipeline.py
 │   ├── test_llm_reasoning_control.py
@@ -290,12 +291,12 @@ docker run -p 7860:7860 --env-file .env -v $(pwd)/artifacts:/app/artifacts meeti
 ## How to Use the Web UI
 
 1. **Verify Provider Connection**:
-   - Check the **Provider** status chip above the settings: it shows `Connected: <model>` when configured or `Not configured` if an API key is missing.
+   - Check the inline **Provider** status chip in the header row next to the theme toggle (`☀️ Light` / `🌙 Dark`, persisted across reloads in `localStorage`): it shows `Connected: <model>` when configured or `Not configured` if an API key is missing.
    - In the **Provider Settings** accordion (which auto-collapses when configured, or opens highlighted when unconfigured), confirm your Base URL, API Key, Model, and Reasoning effort.
    - Click **Test Connection** to verify connectivity; the status chip updates immediately.
 2. **Add a Recording or Transcript**:
    - **Recording**: Add a meeting video file (`.mp4`, `.mov`, `.mkv`, etc.). The app analyzes duration and automatically recommends optimal Screenshot capture intervals and max Screenshots based on payload budget.
-   - **Transcript**: Optionally add a text transcript (`.txt`, `.md`, `.rtf`). Skips Screenshot extraction, OCR, and audio transcription stages entirely.
+   - **Transcript**: Optionally add a text Transcript (`.txt`, `.md`, `.rtf`). Skips Screenshot extraction, OCR, and audio transcription stages entirely; when no Recording is present, **Screenshot interval (seconds)**, **Max screenshots**, and the capture hint are hidden automatically and restored if a Recording is added or the Transcript is cleared.
 3. **Configure Meeting Notes**:
    - Select **Notes Style**:
      - *Executive Summary*: High-level summary, key decisions, and prioritized actions.
@@ -304,20 +305,20 @@ docker run -p 7860:7860 --env-file .env -v $(pwd)/artifacts:/app/artifacts meeti
      - *Technical Minutes*: Structured formal minutes with agenda, technical specifications, and motions.
    - Select **Meeting Notes language** (English, Spanish, French, German, Japanese, Chinese, Portuguese, Korean, etc.).
 4. **Generate Meeting Notes**:
-   - Click **Generate Meeting Notes**.
-   - Monitor real-time progress: the app displays named stages (**Extracting Screenshots**, **Transcribing**, **Summarizing**, **Done**) alongside an elapsed-time indicator.
+   - Click **Generate Meeting Notes** (the button locks as **Generating...** while running and unlocks on completion, failure, or **Reset**).
+   - Monitor real-time progress: the results pane displays a 4-step progress card (**Extracting Screenshots**, **Transcribing**, **Summarizing**, **Done**) alongside an elapsed-time indicator (marking Recording-only steps as skipped on Transcript-only runs).
    - If an error occurs, an actionable dismissible error banner identifies the cause (e.g. invalid key, missing FFmpeg, payload size) and suggests a fix.
-   - Review generated results:
-     - **Screenshots**: Extracted presentation Screenshots.
-     - **Rendered Meeting Notes**: The primary rendered HTML view post-generation, complete with **Copy Markdown** and **Download HTML** quick-share buttons.
+   - Review generated Meeting Notes across the results tabs:
+     - **Rendered Meeting Notes**: The primary rendered HTML view post-generation, complete with compact, right-aligned **Copy Markdown** and **Download HTML** quick-share buttons.
      - **Markdown**: Secondary tab containing raw Markdown Meeting Notes for editing or inspection.
+     - **Screenshots**: Dedicated tab displaying extracted presentation Screenshots (hidden automatically when no Screenshots exist, such as on Transcript-only runs).
   ![notes_demo](./docs/notes_demo.png)
 5. **Ask Questions in Meeting Chat**:
    - Switch to the **Meeting Chat** tab once Meeting Notes generation completes.
    - Click starter question chips (e.g. *"What were the action items?"*, *"Who owns what?"*) to prefill the question input without auto-sending, or type your own question grounded in the Meeting Notes, Transcript, and Screenshot OCR/timestamp metadata.
    ![chat_demo](./docs/chat_demo.png)
    - You can change the **Model**, **Reasoning effort**, or **Meeting Notes language** dropdowns between turns to adjust how subsequent questions are answered.
-   - Click **Clear Chat** to clear the conversation history while keeping the current Meeting Notes and context intact, or **Reset** to clear all inputs, notes, error banners, and chat history back to the friendly initial empty state (*"Add a Recording or Transcript to begin"*).
+   - Click **Clear Chat** to clear the conversation history while keeping the current Meeting Notes and context intact, or **Reset** to clear all inputs, Meeting Notes, error banners, and chat history, hide the **Screenshots** tab, re-enable **Generate Meeting Notes**, and restore the capture sliders back to the friendly initial empty state (*"Add a Recording or Transcript to begin"*).
 
 ---
 
@@ -420,7 +421,7 @@ Add the following to your `claude_desktop_config.json`:
 
 ## Testing & CI
 
-The project contains a 290+ test suite covering the end-to-end pipeline, native Gemini and OpenAI-compatible video chunk transcription, Meeting Chat grounding/lifecycle/resilience, UI view-builders and handlers, LLM reasoning handling, and MCP integration without requiring network access:
+The project contains a 310+ test suite covering the end-to-end pipeline, native Gemini and OpenAI-compatible video chunk transcription, Meeting Chat grounding/lifecycle/resilience, UI view-builders and handlers, LLM reasoning handling, and MCP integration without requiring network access:
 
 ```bash
 # Run all tests using uv

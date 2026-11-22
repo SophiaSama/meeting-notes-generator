@@ -99,11 +99,36 @@ def format_elapsed_time(elapsed_seconds: float) -> str:
     return f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
 
 
-def format_stage_progress(stage: str, elapsed_seconds: float) -> str:
-    """Format the active pipeline stage and elapsed duration into styled HTML."""
+CANONICAL_STAGES: tuple[str, ...] = (
+    "Extracting Screenshots",
+    "Transcribing",
+    "Summarizing",
+    "Done",
+)
+
+_STEP_CHECK_SVG = (
+    '<svg class="stage-step-check-icon" viewBox="0 0 16 16" width="12" height="12" '
+    'fill="none" stroke="currentColor" stroke-width="2.4" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<polyline points="3 8.5 6.5 12 13 4.5"></polyline>'
+    "</svg>"
+)
+
+
+def format_stage_progress(
+    stage: str,
+    elapsed_seconds: float,
+    transcript_only: bool = False,
+) -> str:
+    """Format the 4-step pipeline progress card and elapsed duration into styled HTML."""
     time_str = format_elapsed_time(elapsed_seconds)
-    clean_stage = html.escape(stage.strip())
-    is_done = clean_stage.lower() == "done"
+    raw_stage = (stage or "").strip()
+    clean_stage = html.escape(raw_stage)
+    lower_stage = raw_stage.lower()
+
+    stage_lookup = {name.lower(): idx for idx, name in enumerate(CANONICAL_STAGES)}
+    active_idx = stage_lookup.get(lower_stage, -1)
+    is_done = active_idx == len(CANONICAL_STAGES) - 1
 
     indicator_html = (
         '<span class="stage-check" aria-hidden="true">✓</span>'
@@ -112,11 +137,46 @@ def format_stage_progress(stage: str, elapsed_seconds: float) -> str:
     )
     extra_class = " stage-done" if is_done else ""
 
+    steps_html: list[str] = []
+    for idx, step_name in enumerate(CANONICAL_STAGES):
+        if transcript_only and idx < 2:
+            step_state = "skipped"
+            step_indicator = '<span class="stage-step-dash">&ndash;</span>'
+            badge_html = '<span class="stage-step-badge">Skipped</span>'
+        elif is_done or (active_idx >= 0 and idx < active_idx):
+            step_state = "completed"
+            step_indicator = _STEP_CHECK_SVG
+            badge_html = ""
+        elif active_idx >= 0 and idx == active_idx:
+            step_state = "active"
+            step_indicator = '<span class="stage-step-dot"></span>'
+            badge_html = ""
+        else:
+            step_state = "pending"
+            step_indicator = f'<span class="stage-step-num">{idx + 1}</span>'
+            badge_html = ""
+
+        current_attr = ' aria-current="step"' if step_state == "active" else ""
+        esc_step = html.escape(step_name)
+        steps_html.append(
+            f'<li class="stage-step stage-step-{step_state}" '
+            f'data-stage="{esc_step}" data-state="{step_state}"{current_attr}>'
+            f'<span class="stage-step-indicator" aria-hidden="true">{step_indicator}</span>'
+            f'<span class="stage-step-label">{esc_step}</span>'
+            f"{badge_html}"
+            f"</li>"
+        )
+
     return (
-        f'<div class="stage-progress{extra_class}" role="status" aria-live="polite">'
+        f'<div class="stage-progress stage-progress-card{extra_class}" role="status" aria-live="polite">'
+        f'<div class="stage-progress-header">'
         f"{indicator_html}"
         f'<span class="stage-name">{clean_stage}</span>'
         f'<span class="stage-elapsed">({time_str})</span>'
+        f"</div>"
+        f'<ol class="stage-steps" aria-label="Generation progress">'
+        f'{"".join(steps_html)}'
+        f"</ol>"
         f"</div>"
     )
 
@@ -206,6 +266,7 @@ class ResultsPaneState:
     starter_visible: bool
     stage_html: str
     stage_visible: bool
+    screenshots_visible: bool = False
 
 
 def begin_generation(is_transcript_only: bool = False) -> ResultsPaneState:
@@ -223,8 +284,13 @@ def begin_generation(is_transcript_only: bool = False) -> ResultsPaneState:
         error_html="",
         error_visible=False,
         starter_visible=False,
-        stage_html=format_stage_progress(initial_stage, 0.0),
+        stage_html=format_stage_progress(
+            initial_stage,
+            0.0,
+            transcript_only=is_transcript_only,
+        ),
         stage_visible=True,
+        screenshots_visible=False,
     )
 
 
@@ -250,6 +316,7 @@ def complete_generation(
         starter_visible=True,
         stage_html="",
         stage_visible=False,
+        screenshots_visible=bool(thumbnails),
     )
 
 
@@ -270,6 +337,7 @@ def fail_generation(error_text: str) -> ResultsPaneState:
         starter_visible=False,
         stage_html="",
         stage_visible=False,
+        screenshots_visible=False,
     )
 
 
@@ -289,4 +357,5 @@ def reset_results_pane() -> ResultsPaneState:
         starter_visible=False,
         stage_html="",
         stage_visible=False,
+        screenshots_visible=False,
     )
