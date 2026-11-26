@@ -733,23 +733,43 @@ _TK_FOLDER_PICKER_SCRIPT = (
     "chosen = filedialog.askdirectory(title='Select Obsidian Vault folder', initialdir=init_dir)\n"
     "root.destroy()\n"
     "if not chosen:\n"
+    "    sys.stderr.write('User canceled\\n')\n"
     "    sys.exit(1)\n"
     "print(chosen)\n"
 )
 
 _MACOS_FOLDER_PICKER_SCRIPT = (
+    'use framework "AppKit"\n'
+    'use framework "Foundation"\n'
+    "use scripting additions\n"
     "on run argv\n"
-    "  if (count of argv) > 0 and item 1 of argv is not \"\" then\n"
-    "    try\n"
-    "      set defaultLoc to POSIX file (item 1 of argv) as alias\n"
-    "      return POSIX path of (choose folder with prompt \"Select Obsidian Vault folder\" default location defaultLoc)\n"
-    "    on error number -128\n"
-    "      error number -128\n"
-    "    on error\n"
-    "      return POSIX path of (choose folder with prompt \"Select Obsidian Vault folder\")\n"
-    "    end try\n"
+    "  set appInst to current application's NSApplication's sharedApplication()\n"
+    "  appInst's setActivationPolicy:(current application's NSApplicationActivationPolicyAccessory)\n"
+    "  set panel to current application's NSOpenPanel's openPanel()\n"
+    '  panel\'s setTitle:"Select Obsidian Vault folder"\n'
+    '  panel\'s setMessage:"Select Obsidian Vault folder"\n'
+    '  panel\'s setPrompt:"Select"\n'
+    "  panel's setCanChooseFiles:false\n"
+    "  panel's setCanChooseDirectories:true\n"
+    "  panel's setCanCreateDirectories:true\n"
+    "  panel's setAllowsMultipleSelection:false\n"
+    "  set behavior to ((current application's NSWindowCollectionBehaviorCanJoinAllSpaces) as integer)"
+    " + ((current application's NSWindowCollectionBehaviorFullScreenAuxiliary) as integer)\n"
+    "  panel's setCollectionBehavior:behavior\n"
+    "  panel's setFloatingPanel:true\n"
+    "  panel's setLevel:(current application's NSModalPanelWindowLevel)\n"
+    '  if (count of argv) > 0 and item 1 of argv is not "" then\n'
+    "    set dirURL to current application's NSURL's fileURLWithPath:(item 1 of argv)\n"
+    "    panel's setDirectoryURL:dirURL\n"
+    "  end if\n"
+    "  appInst's activateIgnoringOtherApps:true\n"
+    "  panel's makeKeyAndOrderFront:(missing value)\n"
+    "  set resp to panel's runModal()\n"
+    "  if (resp as integer) is 1 then\n"
+    "    set pickedURL to panel's URL()\n"
+    "    return ((pickedURL's |path|()) as text)\n"
     "  else\n"
-    "    return POSIX path of (choose folder with prompt \"Select Obsidian Vault folder\")\n"
+    "    error number -128\n"
     "  end if\n"
     "end run\n"
 )
@@ -763,7 +783,8 @@ _WINDOWS_FOLDER_PICKER_SCRIPT = (
     "(Test-Path -LiteralPath $env:MEETING_NOTES_PICKER_INIT_DIR -PathType Container)) { "
     "$dlg.SelectedPath = $env:MEETING_NOTES_PICKER_INIT_DIR }; "
     "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
-    "Write-Output $dlg.SelectedPath } else { exit 1 }"
+    "Write-Output $dlg.SelectedPath } else { "
+    "[Console]::Error.WriteLine('User canceled'); exit 1 }"
 )
 
 
@@ -1321,7 +1342,8 @@ class MeetingNotesApp:
                 ),
             )
 
-        if getattr(result, "returncode", 1) == 0:
+        returncode = getattr(result, "returncode", 1)
+        if returncode == 0:
             picked = self._normalize_picked_directory(getattr(result, "stdout", "") or "")
             if picked:
                 return (
@@ -1336,10 +1358,25 @@ class MeetingNotesApp:
                 ),
             )
 
+        stderr_lower = (getattr(result, "stderr", "") or "").strip().lower()
+        is_user_cancel = (
+            "cancel" in stderr_lower
+            or "-128" in stderr_lower
+            or (not stderr_lower and returncode == 1)
+        )
+        if is_user_cancel:
+            return (
+                gr.update(),
+                gr.update(
+                    value="Folder selection canceled. Existing Obsidian Vault Path kept.",
+                    visible=True,
+                ),
+            )
+
         return (
             gr.update(),
             gr.update(
-                value="Folder selection canceled. Existing Obsidian Vault Path kept.",
+                value="Native folder picker unavailable in this environment. Enter or paste the Obsidian Vault Path manually.",
                 visible=True,
             ),
         )
@@ -2026,7 +2063,7 @@ class MeetingNotesApp:
                 self._on_obsidian_browse,
                 inputs=[obsidian_vault_input],
                 outputs=[obsidian_vault_input, obsidian_status_md],
-                show_progress="hidden",
+                show_progress="minimal",
             )
             obsidian_prepare_btn.click(
                 self._on_obsidian_prepare,

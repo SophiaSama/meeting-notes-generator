@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from unittest.mock import MagicMock
 
@@ -1136,13 +1137,35 @@ class TestObsidianExportUIHandlers:
         assert "value" not in vault_err
         assert "manually" in status_err.get("value", "").lower()
 
+        # Non-cancel subprocess errors (-1713 / missing tkinter) report manual fallback, not cancel
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="execution error: No user interaction allowed. (-1713)"
+            ),
+        )
+        vault_fail, status_fail = app._on_obsidian_browse("/existing/vault")
+        assert "value" not in vault_fail
+        assert "manually" in status_fail.get("value", "").lower()
+
     def test_build_folder_picker_command_platforms(self, monkeypatch, tmp_path):
         # macOS passes initial_dir via argv
         monkeypatch.setattr("meeting_notes.ui.sys.platform", "darwin")
         cmd_mac, env_mac = MeetingNotesApp._build_folder_picker_command(str(tmp_path))
         assert cmd_mac[0] == "osascript"
+        assert "NSOpenPanel" in cmd_mac[2]
+        assert "activateIgnoringOtherApps" in cmd_mac[2]
         assert cmd_mac[-1] == str(tmp_path)
         assert env_mac is None
+        if shutil.which("osacompile"):
+            compiled_scpt = tmp_path / "picker_check.scpt"
+            comp = subprocess.run(
+                ["osacompile", "-o", str(compiled_scpt), "-e", cmd_mac[2]],
+                capture_output=True,
+                text=True,
+            )
+            assert comp.returncode == 0, comp.stderr
 
         # Windows passes initial_dir via env var
         monkeypatch.setattr("meeting_notes.ui.sys.platform", "win32")
