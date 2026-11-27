@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
 from unittest.mock import MagicMock
+
+import gradio as gr
 import pytest
 
 from meeting_notes.ui import MeetingNotesApp, StageProgressTracker
+from meeting_notes.views import (
+    format_obsidian_export_success,
+    format_obsidian_overwrite_warning,
+    format_obsidian_prepare_status,
+)
 from tests.conftest import FakeLLMService
 
 
@@ -313,7 +322,7 @@ class TestResultsPaneEmptyAndPopulatedState:
         assert app.notes_output is app.notes_text
 
     def test_generate_handler_visibility_transition(self):
-        """_on_generate_click returns 10 outputs, hiding empty state, revealing results container, and hiding error banner."""
+        """_on_generate_click returns 12 outputs, hiding empty state, revealing results container, and hiding error banner."""
         app = MeetingNotesApp()
         mock_pipeline = MagicMock()
         mock_pipeline.run_pipeline_safe.return_value = (
@@ -349,7 +358,7 @@ class TestResultsPaneEmptyAndPopulatedState:
         assert starter_row_update.get("visible") is True
 
     def test_reset_handler_visibility_transition(self):
-        """_on_reset returns 15 outputs, restoring empty state to visible, hiding results container, error banner, and starter row."""
+        """_on_reset returns 16 outputs, restoring empty state to visible, hiding results container, error banner, and starter row."""
         app = MeetingNotesApp()
         outputs = app._on_reset()
         assert len(outputs) == 16
@@ -920,3 +929,516 @@ class TestResetControlsRestoration:
         assert interval_u.get("visible") is True
         assert max_u.get("value") == 8
         assert max_u.get("visible") is True
+
+
+class TestObsidianExportViews:
+    """Unit tests for pure Obsidian export formatting helpers in meeting_notes/views.py."""
+
+    _FORBIDDEN_GLOSSARY_RE = re.compile(
+        r"\b(minutes|frames?|images?|chatbot|llm settings|backend)\b",
+        re.IGNORECASE,
+    )
+
+    def test_prepare_status_with_screenshots_and_faq_avoids_overwrite_and_glossary_terms(self):
+        msg = format_obsidian_prepare_status(
+            {
+                "target_dir": "/vault/2026-11-24 Weekly Sync",
+                "notes_filename": "2026-11-24 Weekly Sync.md",
+                "screenshot_count": 3,
+                "default_attachment_prefix": "sync",
+                "faq_filename": "2026-11-24 Weekly Sync - FAQ.md",
+                "faq_markdown": "## FAQ\n\n### Owner?\nAlice.",
+            }
+        )
+        assert "/vault/2026-11-24 Weekly Sync" in msg
+        assert "2026-11-24 Weekly Sync.md" in msg
+        assert "3 Screenshot(s)" in msg
+        assert "2026-11-24 Weekly Sync - FAQ.md" in msg
+        assert "already exists" not in msg.lower()
+        assert "overwrite" not in msg.lower()
+        assert not self._FORBIDDEN_GLOSSARY_RE.search(msg)
+
+    def test_prepare_status_zero_screenshots_and_empty_faq(self):
+        msg = format_obsidian_prepare_status(
+            {
+                "target_dir": "/vault/2026-11-24 Transcript Sync",
+                "notes_filename": "2026-11-24 Transcript Sync.md",
+                "screenshot_count": 0,
+                "default_attachment_prefix": "screenshot",
+                "faq_filename": "2026-11-24 Transcript Sync - FAQ.md",
+                "faq_markdown": None,
+            }
+        )
+        assert "0 Screenshots" in msg
+        assert "no `attachment/` folder" in msg
+        assert "omitted" in msg
+        assert "already exists" not in msg.lower()
+        assert "overwrite" not in msg.lower()
+        assert not self._FORBIDDEN_GLOSSARY_RE.search(msg)
+
+    def test_overwrite_warning_and_export_success_copy(self):
+        warn = format_obsidian_overwrite_warning("/vault/2026-11-24 Weekly Sync")
+        assert "already exists" in warn.lower()
+        assert "overwrite" in warn.lower()
+        assert "/vault/2026-11-24 Weekly Sync" in warn
+        assert not self._FORBIDDEN_GLOSSARY_RE.search(warn)
+
+        success = format_obsidian_export_success(
+            {
+                "target_dir": "/vault/2026-11-24 Weekly Sync",
+                "notes_filename": "2026-11-24 Weekly Sync.md",
+                "screenshots_copied": 2,
+                "faq_path": "/vault/2026-11-24 Weekly Sync/2026-11-24 Weekly Sync - FAQ.md",
+                "faq_filename": "2026-11-24 Weekly Sync - FAQ.md",
+            }
+        )
+        assert "/vault/2026-11-24 Weekly Sync" in success
+        assert "2 Screenshot(s)" in success
+        assert "2026-11-24 Weekly Sync - FAQ.md" in success
+        assert "already exists" not in success.lower()
+        assert "overwrite" not in success.lower()
+        assert not self._FORBIDDEN_GLOSSARY_RE.search(success)
+
+
+class TestObsidianExportUIHandlers:
+    """Unit tests for Export to Obsidian UI controls, subprocess picker, state transitions, and reset."""
+
+    _FORBIDDEN_GLOSSARY_RE = re.compile(
+        r"\b(minutes|frames?|images?|chatbot|llm settings|backend)\b",
+        re.IGNORECASE,
+    )
+
+    def test_initial_obsidian_controls_state_and_glossary(self):
+        app = MeetingNotesApp()
+        assert isinstance(app.obsidian_export_state, gr.State)
+        assert app.obsidian_export_state.value is None
+        assert not hasattr(app, "obsidian_export")
+        assert app.obsidian_export_accordion.label == "Export to Obsidian"
+        assert app.obsidian_export_accordion.open is False
+        assert app.obsidian_vault_input.interactive is True
+        assert app.obsidian_prefix_input.value == "screenshot"
+        assert app.obsidian_prepare_btn.interactive is False
+        assert app.obsidian_confirm_btn.visible in (False, "hidden")
+        assert app.obsidian_cancel_btn.visible in (False, "hidden")
+        assert app.obsidian_faq_preview.visible in (False, "hidden")
+        assert app.obsidian_status_md.visible in (False, "hidden")
+        assert app.obsidian_warning_md.visible in (False, "hidden")
+
+        for comp in (
+            app.obsidian_export_accordion,
+            app.obsidian_vault_input,
+            app.obsidian_browse_btn,
+            app.obsidian_prefix_input,
+            app.obsidian_prepare_btn,
+            app.obsidian_status_md,
+            app.obsidian_warning_md,
+            app.obsidian_faq_preview,
+            app.obsidian_confirm_btn,
+            app.obsidian_cancel_btn,
+        ):
+            blob = " ".join(
+                str(getattr(comp, attr, "") or "")
+                for attr in ("label", "value", "info", "placeholder")
+            )
+            assert not self._FORBIDDEN_GLOSSARY_RE.search(blob), blob
+            assert "already exists" not in blob.lower()
+            assert "overwrite" not in blob.lower()
+
+    def test_after_generate_and_reset_sync_guard_and_clear_pending_state(self):
+        app = MeetingNotesApp()
+        mock_pipeline = MagicMock()
+        app.pipeline_service = mock_pipeline
+
+        mock_pipeline._is_valid_meeting_context.return_value = True
+        state_out, prep_u, conf_u, canc_u, faq_u, warn_u, status_u = app._on_obsidian_after_generate(
+            {"raw_notes": "# Title", "markdown_notes": "# Title"}
+        )
+        assert state_out is None
+        assert prep_u.get("interactive") is True
+        assert conf_u.get("visible") is False
+        assert canc_u.get("visible") is False
+        assert faq_u.get("value") == "" and faq_u.get("visible") is False
+        assert warn_u.get("value") == "" and warn_u.get("visible") is False
+        assert status_u.get("value") == "" and status_u.get("visible") is False
+
+        # Empty/invalid context keeps prepare_btn disabled
+        mock_pipeline._is_valid_meeting_context.return_value = False
+        state_bad, prep_bad, *_ = app._on_obsidian_after_generate(None)
+        assert state_bad is None
+        assert prep_bad.get("interactive") is False
+
+        # Reset restores defaults and collapses accordion
+        r_state, r_vault, r_prefix, r_prep, r_conf, r_canc, r_faq, r_warn, r_status, r_acc = (
+            app._on_obsidian_reset()
+        )
+        assert r_state is None
+        assert r_vault.get("value") == ""
+        assert r_prefix.get("value") == "screenshot"
+        assert r_prep.get("interactive") is False
+        assert r_conf.get("visible") is False
+        assert r_canc.get("visible") is False
+        assert r_faq.get("value") == "" and r_faq.get("visible") is False
+        assert r_warn.get("value") == "" and r_warn.get("visible") is False
+        assert r_status.get("value") == "" and r_status.get("visible") is False
+        assert r_acc.get("open") is False
+
+    def test_browse_subprocess_success_cancel_and_error_fallbacks(self, monkeypatch, tmp_path):
+        app = MeetingNotesApp()
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_success(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"  {tmp_path}/ \n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_success)
+        vault_u, status_u = app._on_obsidian_browse(str(tmp_path))
+        assert len(calls) == 1
+        assert calls[0][1].get("shell", False) is False
+        assert vault_u.get("value") == str(tmp_path)
+        assert status_u.get("visible") is True
+
+        # Cancel keeps existing path via gr.update() (no value key)
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="User canceled"),
+        )
+        vault_cancel, status_cancel = app._on_obsidian_browse("/existing/vault")
+        assert "value" not in vault_cancel
+        assert status_cancel.get("visible") is True
+
+        # Empty stdout keeps existing path
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="   \n", stderr=""),
+        )
+        vault_empty, status_empty = app._on_obsidian_browse("/existing/vault")
+        assert "value" not in vault_empty
+        assert status_empty.get("visible") is True
+
+        # Timeout and missing binary fall back gracefully without raising
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(side_effect=subprocess.TimeoutExpired(["osascript"], 60)),
+        )
+        vault_to, status_to = app._on_obsidian_browse("/existing/vault")
+        assert "value" not in vault_to
+        assert "manually" in status_to.get("value", "").lower()
+
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(side_effect=FileNotFoundError("no picker binary")),
+        )
+        vault_err, status_err = app._on_obsidian_browse("/existing/vault")
+        assert "value" not in vault_err
+        assert "manually" in status_err.get("value", "").lower()
+
+    def test_build_folder_picker_command_platforms(self, monkeypatch, tmp_path):
+        # macOS passes initial_dir via argv
+        monkeypatch.setattr("meeting_notes.ui.sys.platform", "darwin")
+        cmd_mac, env_mac = MeetingNotesApp._build_folder_picker_command(str(tmp_path))
+        assert cmd_mac[0] == "osascript"
+        assert cmd_mac[-1] == str(tmp_path)
+        assert env_mac is None
+
+        # Windows passes initial_dir via env var
+        monkeypatch.setattr("meeting_notes.ui.sys.platform", "win32")
+        monkeypatch.setattr("meeting_notes.ui.shutil.which", lambda name: "powershell.exe" if name == "powershell" else None)
+        cmd_win, env_win = MeetingNotesApp._build_folder_picker_command(str(tmp_path))
+        assert "-STA" in cmd_win
+        assert env_win is not None and env_win["MEETING_NOTES_PICKER_INIT_DIR"] == str(tmp_path)
+
+        # Linux falls back to zenity -> kdialog -> tkinter
+        monkeypatch.setattr("meeting_notes.ui.sys.platform", "linux")
+        monkeypatch.setattr("meeting_notes.ui.shutil.which", lambda name: "/usr/bin/zenity" if name == "zenity" else None)
+        cmd_zen, _ = MeetingNotesApp._build_folder_picker_command(str(tmp_path))
+        assert cmd_zen[0] == "/usr/bin/zenity"
+
+        monkeypatch.setattr("meeting_notes.ui.shutil.which", lambda name: None)
+        cmd_tk, _ = MeetingNotesApp._build_folder_picker_command(str(tmp_path))
+        assert cmd_tk[1] == "-c"
+        assert cmd_tk[-1] == str(tmp_path)
+
+    def test_browse_and_command_handle_embedded_nul_byte_gracefully(self, monkeypatch):
+        bad_path = "~\x00bad"
+        cmd, env = MeetingNotesApp._build_folder_picker_command(bad_path)
+        assert isinstance(cmd, list) and len(cmd) >= 1
+        assert bad_path not in cmd
+        if env is not None:
+            assert "MEETING_NOTES_PICKER_INIT_DIR" not in env
+
+        app = MeetingNotesApp()
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda c, **kw: subprocess.CompletedProcess(c, 1, stdout="", stderr="canceled"),
+        )
+        vault_u, status_u = app._on_obsidian_browse(bad_path)
+        assert "value" not in vault_u
+        assert status_u.get("visible") is True
+
+    @pytest.mark.parametrize("bad_tilde", ["~nonexistent_user_xyz", "~bob/vault"])
+    def test_browse_and_command_handle_unknown_tilde_user_gracefully(self, monkeypatch, bad_tilde):
+        for platform in ("darwin", "win32", "linux"):
+            monkeypatch.setattr("meeting_notes.ui.sys.platform", platform)
+            if platform == "win32":
+                monkeypatch.setattr(
+                    "meeting_notes.ui.shutil.which",
+                    lambda name: "powershell.exe" if name == "powershell" else None,
+                )
+            elif platform == "linux":
+                monkeypatch.setattr("meeting_notes.ui.shutil.which", lambda name: None)
+
+            cmd, env = MeetingNotesApp._build_folder_picker_command(bad_tilde)
+            assert isinstance(cmd, list) and len(cmd) >= 1
+            assert bad_tilde not in cmd
+            if env is not None:
+                assert "MEETING_NOTES_PICKER_INIT_DIR" not in env
+
+        app = MeetingNotesApp()
+        seen_cmds: list[list[str]] = []
+
+        def fake_run(c, **kw):
+            seen_cmds.append(c)
+            return subprocess.CompletedProcess(c, 1, stdout="", stderr="canceled")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        vault_u, status_u = app._on_obsidian_browse(bad_tilde)
+        assert len(seen_cmds) == 1
+        assert bad_tilde not in seen_cmds[0]
+        assert "value" not in vault_u
+        assert status_u.get("visible") is True
+
+    def test_build_folder_picker_command_linux_kdialog_and_home_failure(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("meeting_notes.ui.sys.platform", "linux")
+        monkeypatch.setattr(
+            "meeting_notes.ui.shutil.which",
+            lambda name: "/usr/bin/kdialog" if name == "kdialog" else None,
+        )
+
+        # 1. Valid vault path uses initial_dir
+        cmd_dir, env_dir = MeetingNotesApp._build_folder_picker_command(str(tmp_path))
+        assert cmd_dir == [
+            "/usr/bin/kdialog",
+            "--getexistingdirectory",
+            str(tmp_path),
+            "--title",
+            "Select Obsidian Vault folder",
+        ]
+        assert env_dir is None
+
+        # 2. Empty path falls back to Path.home() when available
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("meeting_notes.ui.Path.home", classmethod(lambda cls: fake_home))
+        cmd_home, env_home = MeetingNotesApp._build_folder_picker_command("")
+        assert cmd_home == [
+            "/usr/bin/kdialog",
+            "--getexistingdirectory",
+            str(fake_home),
+            "--title",
+            "Select Obsidian Vault folder",
+        ]
+        assert env_home is None
+
+        # 3. Unset HOME + Path.home() RuntimeError omits start_dir cleanly
+        monkeypatch.delenv("HOME", raising=False)
+        monkeypatch.setattr(
+            "meeting_notes.ui.Path.home",
+            classmethod(
+                lambda cls: (_ for _ in ()).throw(
+                    RuntimeError("Could not determine home directory.")
+                )
+            ),
+        )
+        cmd_no_home, env_no_home = MeetingNotesApp._build_folder_picker_command("")
+        assert cmd_no_home == [
+            "/usr/bin/kdialog",
+            "--getexistingdirectory",
+            "--title",
+            "Select Obsidian Vault folder",
+        ]
+        assert env_no_home is None
+
+        app = MeetingNotesApp()
+        seen_cmds: list[list[str]] = []
+
+        def fake_run(c, **kw):
+            seen_cmds.append(c)
+            return subprocess.CompletedProcess(c, 1, stdout="", stderr="canceled")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        vault_u, status_u = app._on_obsidian_browse("")
+        assert seen_cmds == [
+            [
+                "/usr/bin/kdialog",
+                "--getexistingdirectory",
+                "--title",
+                "Select Obsidian Vault folder",
+            ]
+        ]
+        assert "value" not in vault_u
+        assert status_u.get("visible") is True
+
+    def test_browse_error_guards_fall_back_to_manual_entry(self, monkeypatch):
+        app = MeetingNotesApp()
+        with monkeypatch.context() as m:
+            run_mock = MagicMock()
+            m.setattr(subprocess, "run", run_mock)
+            m.setattr(
+                app,
+                "_build_folder_picker_command",
+                MagicMock(side_effect=RuntimeError("picker command failure")),
+            )
+            vault_u, status_u = app._on_obsidian_browse("/existing/vault")
+            assert "value" not in vault_u
+            assert status_u.get("visible") is True
+            assert "manually" in status_u.get("value", "").lower()
+            run_mock.assert_not_called()
+
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            MagicMock(side_effect=PermissionError("operation not permitted")),
+        )
+        vault_perm, status_perm = app._on_obsidian_browse("/existing/vault")
+        assert "value" not in vault_perm
+        assert status_perm.get("visible") is True
+        assert "manually" in status_perm.get("value", "").lower()
+
+    def test_prepare_confirm_and_cancel_state_transitions(self):
+        app = MeetingNotesApp()
+        mock_pipeline = MagicMock()
+        app.pipeline_service = mock_pipeline
+
+        # 1. Invalid meeting_context blocks before calling prepare_obsidian_export
+        mock_pipeline._is_valid_meeting_context.return_value = False
+        st, status_u, warn_u, faq_u, conf_u, canc_u = app._on_obsidian_prepare(
+            "/vault", "shot", None, [], "http://x", "k", "m",
+        )
+        assert st is None
+        assert status_u.get("visible") is True
+        assert conf_u.get("visible") is False
+        assert canc_u.get("visible") is False
+        assert faq_u.get("visible") is False
+        mock_pipeline.prepare_obsidian_export.assert_not_called()
+
+        # 2. Prepare exception keeps confirm/cancel/faq hidden
+        mock_pipeline._is_valid_meeting_context.return_value = True
+        mock_pipeline.prepare_obsidian_export.side_effect = ValueError("Vault path does not exist")
+        ctx = {"raw_notes": "# Sync", "markdown_notes": "# Sync"}
+        st, status_u, warn_u, faq_u, conf_u, canc_u = app._on_obsidian_prepare(
+            "/missing", "shot", ctx, [], "http://x", "k", "m",
+        )
+        assert st is None
+        assert "Vault path does not exist" in status_u.get("value", "")
+        assert warn_u.get("visible") is False
+        assert faq_u.get("visible") is False
+        assert conf_u.get("visible") is False
+        assert canc_u.get("visible") is False
+
+        # 3. Prepare with collision & non-empty FAQ reveals warning, editable FAQ, confirm & cancel
+        prepared = {
+            "vault_path": "/vault",
+            "folder_name": "2026-11-24 Sync",
+            "target_dir": "/vault/2026-11-24 Sync",
+            "notes_filename": "2026-11-24 Sync.md",
+            "faq_filename": "2026-11-24 Sync - FAQ.md",
+            "exists": True,
+            "faq_markdown": "## FAQ\n\n### Q?\nA.",
+            "screenshot_count": 1,
+            "default_attachment_prefix": "shot",
+        }
+        mock_pipeline.prepare_obsidian_export.side_effect = None
+        mock_pipeline.prepare_obsidian_export.return_value = prepared
+        st, status_u, warn_u, faq_u, conf_u, canc_u = app._on_obsidian_prepare(
+            "/vault", "shot", ctx, [{"role": "user", "content": "Q?"}], "http://x", "k", "m",
+        )
+        assert st == prepared
+        assert "/vault/2026-11-24 Sync" in status_u.get("value", "")
+        assert "already exists" not in status_u.get("value", "").lower()
+        assert warn_u.get("visible") is True
+        assert "already exists" in warn_u.get("value", "").lower()
+        assert faq_u.get("visible") is True
+        assert faq_u.get("interactive") is True
+        assert faq_u.get("value") == "## FAQ\n\n### Q?\nA."
+        assert conf_u.get("visible") is True
+        assert canc_u.get("visible") is True
+
+        # 4. Cancel clears state without calling export_to_obsidian
+        c_st, c_status, c_warn, c_faq, c_conf, c_canc = app._on_obsidian_cancel()
+        assert c_st is None
+        assert "canceled" in c_status.get("value", "").lower()
+        assert c_warn.get("visible") is False
+        assert c_faq.get("visible") is False
+        assert c_conf.get("visible") is False
+        assert c_canc.get("visible") is False
+        mock_pipeline.export_to_obsidian.assert_not_called()
+
+        # 5. Confirm without prepared state does not call export_to_obsidian
+        g_st, g_status, _g_warn, _g_faq, g_conf, g_canc = app._on_obsidian_confirm(None, "shot", "")
+        assert g_st is None
+        assert g_status.get("visible") is True
+        assert g_conf.get("visible") is False
+        assert g_canc.get("visible") is False
+        mock_pipeline.export_to_obsidian.assert_not_called()
+
+        # 6. Confirm conflict updates state exists=True and surfaces warning
+        mock_pipeline.export_to_obsidian.return_value = {
+            "status": "conflict",
+            "written": False,
+            "target_dir": "/vault/2026-11-24 Sync",
+        }
+        non_existing = {**prepared, "exists": False}
+        cf_st, cf_status, cf_warn, _cf_faq, cf_conf, cf_canc = app._on_obsidian_confirm(
+            non_existing, "shot", "## Edited FAQ",
+        )
+        assert cf_st["exists"] is True
+        assert cf_warn.get("visible") is True
+        assert "already exists" in cf_warn.get("value", "").lower()
+        assert cf_conf.get("visible") is True
+        assert cf_canc.get("visible") is True
+
+        # 7. Confirm success writes, clears state, and hides confirmation widgets
+        mock_pipeline.export_to_obsidian.return_value = {
+            "status": "exported",
+            "written": True,
+            "target_dir": "/vault/2026-11-24 Sync",
+            "notes_filename": "2026-11-24 Sync.md",
+            "screenshots_copied": 1,
+            "faq_path": "/vault/2026-11-24 Sync/2026-11-24 Sync - FAQ.md",
+            "faq_filename": "2026-11-24 Sync - FAQ.md",
+        }
+        ok_st, ok_status, ok_warn, ok_faq, ok_conf, ok_canc = app._on_obsidian_confirm(
+            prepared, "shot", "## Edited FAQ",
+        )
+        mock_pipeline.export_to_obsidian.assert_called_with(
+            prepared,
+            attachment_prefix="shot",
+            faq_markdown="## Edited FAQ",
+            overwrite=True,
+        )
+        assert ok_st is None
+        assert "Exported Meeting Notes" in ok_status.get("value", "")
+        assert ok_warn.get("visible") is False
+        assert ok_faq.get("visible") is False
+        assert ok_conf.get("visible") is False
+        assert ok_canc.get("visible") is False
+
+    def test_wrap_html_preview_preserves_doctype_and_wraps_body_in_article(self):
+        full_doc = "<!DOCTYPE html><html><head></head><body><h2>Executive Summary</h2></body></html>"
+        wrapped = MeetingNotesApp._wrap_html_preview(full_doc)
+        assert wrapped.startswith("<!DOCTYPE html>")
+        assert '<article class="meeting-notes-article"><h2>Executive Summary</h2></article>' in wrapped
+        assert wrapped.endswith("</body></html>")
+
+        already_wrapped = "<!DOCTYPE html><html><body><article>Hi</article></body></html>"
+        assert MeetingNotesApp._wrap_html_preview(already_wrapped) == already_wrapped
+
+        fragment = "<p>Plain fragment</p>"
+        assert MeetingNotesApp._wrap_html_preview(fragment) == '<article class="meeting-notes-article"><p>Plain fragment</p></article>'
+        assert MeetingNotesApp._wrap_html_preview("") == ""
+

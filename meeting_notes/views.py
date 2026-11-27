@@ -359,3 +359,59 @@ def reset_results_pane() -> ResultsPaneState:
         stage_visible=False,
         screenshots_visible=False,
     )
+
+
+def format_obsidian_prepare_status(prepared: dict[str, Any]) -> str:
+    """Format the prepared Obsidian export preview details using GLOSSARY.md terms."""
+    target_dir = str(prepared.get("target_dir") or "")
+    notes_filename = str(prepared.get("notes_filename") or "")
+    screenshot_count = int(prepared.get("screenshot_count") or 0)
+    prefix = str(prepared.get("default_attachment_prefix") or "screenshot")
+    faq_filename = str(prepared.get("faq_filename") or "")
+    has_faq = bool(str(prepared.get("faq_markdown") or "").strip())
+
+    lines = [
+        f"**Target folder:** `{target_dir}`",
+        f"**Meeting Notes file:** `{notes_filename}`",
+    ]
+    if screenshot_count > 0:
+        lines.append(
+            f"**Screenshots:** {screenshot_count} Screenshot(s) will be copied into "
+            f"`attachment/` with prefix `{prefix}`."
+        )
+    else:
+        lines.append("**Screenshots:** 0 Screenshots (no `attachment/` folder will be created).")
+
+    if has_faq and faq_filename:
+        lines.append(
+            f"**Meeting Chat FAQ:** Distilled draft ready for review (`{faq_filename}`)."
+        )
+    else:
+        lines.append("**Meeting Chat FAQ:** No Meeting Chat turns to distill; FAQ file will be omitted.")
+
+    return "\n\n".join(lines)
+
+
+def format_obsidian_overwrite_warning(target_dir: str) -> str:
+    """Format the explicit collision warning shown when the Obsidian target folder already exists."""
+    return (
+        f"⚠️ **Target folder already exists:** `{target_dir}`. "
+        "Confirming will overwrite only the exported Meeting Notes, FAQ, and `attachment/` "
+        "folder while preserving any other files in that folder."
+    )
+
+
+def format_obsidian_export_success(result: dict[str, Any]) -> str:
+    """Format the completion status after writing Meeting Notes to the Obsidian vault."""
+    target_dir = str(result.get("target_dir") or "")
+    notes_filename = str(result.get("notes_filename") or "")
+    screenshots_copied = int(result.get("screenshots_copied") or 0)
+    faq_path = result.get("faq_path")
+    faq_filename = str(result.get("faq_filename") or "")
+
+    details = [f"`{notes_filename}`", f"{screenshots_copied} Screenshot(s)"]
+    if faq_path and faq_filename:
+        details.append(f"FAQ `{faq_filename}`")
+
+    return f"✅ **Exported Meeting Notes** to `{target_dir}` ({', '.join(details)})."
+

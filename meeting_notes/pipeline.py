@@ -1,3 +1,4 @@
+import ast
 import json
 import logging
 import math
@@ -7,19 +8,37 @@ import shutil
 import tempfile
 import textwrap
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
+from datetime import date, datetime, timezone
 from html import escape
-from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+from urllib.parse import quote
 
 import gradio as gr
 
-from .llm import LLMOutputLimitError, LLMService
+from .llm import (
+    LLMOutputLimitError,
+    LLMService,
+    REASONING_EFFORT_NONE,
+    normalize_reasoning_effort,
+)
 from .notes import NotesService
 from .video import NoAudioStreamError, TranscriptionConfigError, VideoService
 
 logger = logging.getLogger(__name__)
+
+_UNSET = object()
+_INTERNAL_SCREENSHOT_LINK_RE = re.compile(
+    r"!\[([^\]]*)\]\(((?:\./)?(?:artifacts/meeting_minutes/)?images/[^)\n]+?/screenshot_(\d+)\.(?:jpg|jpeg|png))\)",
+    flags=re.IGNORECASE,
+)
+_SCREENSHOT_FILENAME_RE = re.compile(
+    r"^screenshot_(\d+)\.(jpg|jpeg|png)$",
+    flags=re.IGNORECASE,
+)
 
 
 class MeetingContext(dict):
@@ -73,6 +92,34 @@ class PipelineService:
     DEFAULT_LENGTH_RETRY_MAX_TOKENS = 32_000
     DEFAULT_FALLBACK_MAX_TOKENS = 16_000
     DEFAULT_OCR_MAX_WORKERS = 4
+    DEFAULT_OBSIDIAN_TITLE_MAX_TOKENS = 256
+    DEFAULT_REASONING_OBSIDIAN_TITLE_MAX_TOKENS = 4_000
+    DEFAULT_OBSIDIAN_FAQ_MAX_TOKENS = 4_000
+    DEFAULT_REASONING_OBSIDIAN_FAQ_MAX_TOKENS = 16_000
+    OBSIDIAN_COMPONENT_MAX_CHARS = 80
+    OBSIDIAN_COMPONENT_MAX_BYTES = 180
+    _WINDOWS_RESERVED_NAMES = frozenset(
+        {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            *(f"COM{i}" for i in range(1, 10)),
+            *(f"LPT{i}" for i in range(1, 10)),
+        }
+    )
+    _CHAT_PLACEHOLDER_PREFIXES: tuple[str, ...] = (
+        "please generate meeting notes first",
+        "generate meeting notes first, then ask questions",
+        "unable to answer the question right now",
+        "please enter a question",
+        "llm base url is required",
+        "model name is required",
+    )
+    _CHAT_EXCEPTION_PREFIX_RE = re.compile(
+        r"^error:\s+[a-z_][a-z0-9_]*(?:error|exception):",
+        flags=re.IGNORECASE,
+    )
 
     @classmethod
     def _ocr_max_workers(cls) -> int:
@@ -1488,6 +1535,8 @@ class PipelineService:
         frames: list[dict],
         output_language: str,
         notes_style: str,
+        raw_notes: str = "",
+        screenshots_dir: str | Path | None = None,
     ) -> MeetingContext:
         """Build a lightweight, JSON-serializable MeetingContext without PIL or base64 blobs."""
         clean_info = {
@@ -1506,9 +1555,16 @@ class PipelineService:
             }
             for idx, frame in enumerate(frames or [], start=1)
         ]
+        clean_screenshots_dir = (
+            str(screenshots_dir)
+            if screenshots_dir is not None and str(screenshots_dir).strip()
+            else None
+        )
         return MeetingContext(
             info=clean_info,
             markdown_notes=(markdown_notes or "").strip(),
+            raw_notes=(raw_notes or "").strip(),
+            screenshots_dir=clean_screenshots_dir,
             transcript_evidence=(transcript_evidence or "").strip(),
             transcript_source_label=str(transcript_source_label or "transcript"),
             frames_metadata=frames_metadata,
@@ -1857,7 +1913,8 @@ class PipelineService:
         minutes_dir = Path.cwd() / "artifacts" / "meeting_minutes"
         minutes_dir.mkdir(parents=True, exist_ok=True)
         images_dir = minutes_dir / "images"
-        minutes_path = minutes_dir / (info["filename"].rsplit(".", 1)[0] + ".minutes.md")
+        stem = info["filename"].rsplit(".", 1)[0]
+        minutes_path = minutes_dir / (stem + ".minutes.md")
         markdown_body = self.notes_service.build_markdown_notes(
             raw_notes, frames, info, images_dir, minutes_dir
         )
@@ -1943,6 +2000,7 @@ class PipelineService:
             )
         )
 
+        screenshots_dir = str(images_dir / stem) if frames else None
         meeting_context = self.build_meeting_context(
             info=info,
             markdown_notes=markdown_body,
@@ -1951,6 +2009,8 @@ class PipelineService:
             frames=frames,
             output_language=output_language,
             notes_style=notes_style,
+            raw_notes=raw_notes,
+            screenshots_dir=screenshots_dir,
         )
 
         progress(1.0, desc="Done!")
@@ -2045,31 +2105,83 @@ class PipelineService:
             return_context=True,
         )
 
-    @staticmethod
-    def _extract_chat_message_text(content) -> str:
+    @classmethod
+    def _extract_chat_message_text(cls, content) -> str:
+        if content is None:
+            return ""
         if isinstance(content, str):
             return content.strip()
-        if isinstance(content, list):
+        if isinstance(content, dict):
+            for key in ("text", "content", "value"):
+                val = content.get(key)
+                if val is not None and val is not content:
+                    extracted = cls._extract_chat_message_text(val)
+                    if extracted:
+                        return extracted
+            return ""
+        if isinstance(content, (list, tuple)):
             parts: list[str] = []
             for item in content:
-                if isinstance(item, str) and item.strip():
-                    parts.append(item.strip())
+                if isinstance(item, str):
+                    stripped = item.strip()
+                    if stripped:
+                        parts.append(stripped)
                 elif isinstance(item, dict):
-                    text_val = item.get("text") or item.get("content")
-                    if isinstance(text_val, str) and text_val.strip():
-                        parts.append(text_val.strip())
+                    extracted = cls._extract_chat_message_text(item)
+                    if extracted:
+                        parts.append(extracted)
+                elif not isinstance(item, (list, tuple)) and (
+                    hasattr(item, "text")
+                    or hasattr(item, "content")
+                    or hasattr(item, "value")
+                ):
+                    extracted = cls._extract_chat_message_text(item)
+                    if extracted:
+                        parts.append(extracted)
             return "\n".join(parts).strip()
-        if content is None:
+        if (
+            hasattr(content, "text")
+            or hasattr(content, "content")
+            or hasattr(content, "value")
+        ):
+            for attr in ("text", "content", "value"):
+                val = getattr(content, attr, None)
+                if val is not None and val is not content:
+                    extracted = cls._extract_chat_message_text(val)
+                    if extracted:
+                        return extracted
             return ""
         return str(content).strip()
 
+    @staticmethod
+    def _coerce_chat_history(chat_history: list | tuple | str | None) -> list[Any]:
+        if chat_history is None:
+            return []
+        if isinstance(chat_history, str):
+            raw = chat_history.strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError("chat_history must be a JSON list.") from exc
+            if not isinstance(parsed, list):
+                raise ValueError("chat_history must be a JSON list.")
+            return parsed
+        if isinstance(chat_history, (list, tuple)):
+            return list(chat_history)
+        return []
+
     @classmethod
-    def _normalize_chat_history(cls, chat_history: list | None) -> list[dict[str, str]]:
-        """Normalize Gradio Chatbot history (dict messages or tuple pairs) into role/content dicts."""
-        if not chat_history:
+    def _normalize_chat_history(
+        cls, chat_history: list | tuple | str | None
+    ) -> list[dict[str, str]]:
+        """Normalize Gradio Chatbot history (dict messages, objects, or 2-tuples) into role/content dicts."""
+        entries = cls._coerce_chat_history(chat_history)
+        if not entries:
             return []
         normalized: list[dict[str, str]] = []
-        for entry in chat_history:
+        for entry in entries:
             if isinstance(entry, dict):
                 role = str(entry.get("role", "")).strip().lower()
                 content = cls._extract_chat_message_text(entry.get("content"))
@@ -2088,6 +2200,109 @@ class PipelineService:
                 if role in ("user", "assistant") and content:
                     normalized.append({"role": role, "content": content})
         return normalized
+
+    @staticmethod
+    def _unwrap_repr_string(text: str) -> str:
+        """Unwrap a Python string literal (e.g. from ``gr.Error.__str__`` -> ``repr(msg)``)."""
+        stripped = text.strip()
+        if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in ("'", '"'):
+            try:
+                parsed = ast.literal_eval(stripped)
+            except (SyntaxError, ValueError):
+                return stripped
+            if isinstance(parsed, str):
+                return parsed
+        return stripped
+
+    @classmethod
+    def _is_inline_chat_error_or_placeholder(cls, text: str | None) -> bool:
+        """Return True when an assistant turn is empty, an inline error, or a UI placeholder."""
+        collapsed = re.sub(r"\s+", " ", str(text or "")).strip()
+        normalized = collapsed.lower()
+        if not normalized:
+            return True
+        if any(normalized.startswith(prefix) for prefix in cls._CHAT_PLACEHOLDER_PREFIXES):
+            return True
+        if cls._CHAT_EXCEPTION_PREFIX_RE.match(normalized):
+            return True
+
+        unwrapped = cls._unwrap_repr_string(collapsed)
+        if unwrapped != collapsed:
+            unwrapped_norm = re.sub(r"\s+", " ", unwrapped).strip().lower()
+            if not unwrapped_norm:
+                return True
+            if any(
+                unwrapped_norm.startswith(prefix)
+                for prefix in cls._CHAT_PLACEHOLDER_PREFIXES
+            ):
+                return True
+            if cls._CHAT_EXCEPTION_PREFIX_RE.match(unwrapped_norm):
+                return True
+        return False
+
+    @classmethod
+    def _filter_chat_history_for_faq(
+        cls, chat_history: list | tuple | str | None
+    ) -> list[dict[str, str]]:
+        """Normalize Meeting Chat history and strip inline errors, placeholders, and orphaned turns."""
+        entries = cls._coerce_chat_history(chat_history)
+        if not entries:
+            return []
+
+        filtered: list[dict[str, str]] = []
+        pending_users: list[str] = []
+        can_continue_assistant = False
+
+        def _handle_user(text: str) -> None:
+            nonlocal can_continue_assistant
+            can_continue_assistant = False
+            if text:
+                pending_users.append(text)
+
+        def _handle_assistant(text: str) -> None:
+            nonlocal can_continue_assistant
+            if cls._is_inline_chat_error_or_placeholder(text):
+                pending_users.clear()
+                can_continue_assistant = False
+                return
+            if pending_users:
+                for user_text in pending_users:
+                    filtered.append({"role": "user", "content": user_text})
+                filtered.append({"role": "assistant", "content": text})
+                pending_users.clear()
+                can_continue_assistant = True
+            elif can_continue_assistant:
+                filtered.append({"role": "assistant", "content": text})
+
+        for entry in entries:
+            if isinstance(entry, dict):
+                role = str(entry.get("role", "")).strip().lower()
+                text = cls._extract_chat_message_text(entry.get("content"))
+                if role == "user":
+                    _handle_user(text)
+                elif role == "assistant":
+                    _handle_assistant(text)
+            elif isinstance(entry, (tuple, list)) and len(entry) == 2:
+                user_text = cls._extract_chat_message_text(entry[0])
+                assistant_text = cls._extract_chat_message_text(entry[1])
+                if cls._is_inline_chat_error_or_placeholder(assistant_text):
+                    pending_users.clear()
+                    can_continue_assistant = False
+                    continue
+                if user_text:
+                    _handle_user(user_text)
+                    _handle_assistant(assistant_text)
+                elif pending_users or can_continue_assistant:
+                    _handle_assistant(assistant_text)
+            elif hasattr(entry, "role") and hasattr(entry, "content"):
+                role = str(getattr(entry, "role", "")).strip().lower()
+                text = cls._extract_chat_message_text(getattr(entry, "content", ""))
+                if role == "user":
+                    _handle_user(text)
+                elif role == "assistant":
+                    _handle_assistant(text)
+
+        return filtered
 
     @staticmethod
     def _is_valid_meeting_context(meeting_context: dict | None) -> bool:
@@ -2380,3 +2595,1033 @@ class PipelineService:
             {"role": "assistant", "content": msg},
         ]
         return msg, updated_history
+
+    # ------------------------------------------------------------------
+    # Obsidian Vault Export (Tickets 02 & 03)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _validate_vault_path(vault_path: str | Path | None) -> Path:
+        """Validate that ``vault_path`` is a non-empty, existing, writable directory.
+
+        Normalizes with ``expanduser()`` without ``.resolve()`` so symlinked vault
+        paths keep their caller-visible path, and probes writability before any
+        Provider calls or export writes occur.
+        """
+        if vault_path is None:
+            raise ValueError("Please enter or select an Obsidian vault folder path.")
+
+        raw = str(vault_path)
+        if "\x00" in raw:
+            raise ValueError("Obsidian vault path contains an invalid null byte.")
+
+        stripped = raw.strip()
+        if not stripped:
+            raise ValueError("Please enter or select an Obsidian vault folder path.")
+
+        vault_dir = Path(stripped).expanduser()
+        if not vault_dir.exists():
+            raise ValueError(f"Obsidian vault folder does not exist: {vault_dir}")
+        if not vault_dir.is_dir():
+            raise NotADirectoryError(f"Obsidian vault path is not a directory: {vault_dir}")
+
+        if not os.access(vault_dir, os.W_OK | os.X_OK):
+            raise PermissionError(f"Obsidian vault folder is not writable: {vault_dir}")
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                prefix=".obsidian_write_probe_",
+                dir=vault_dir,
+                delete=True,
+            ):
+                pass
+        except PermissionError:
+            raise
+        except OSError as exc:
+            raise PermissionError(
+                f"Obsidian vault folder is not writable: {vault_dir} ({exc})"
+            ) from exc
+
+        return vault_dir
+
+    @classmethod
+    def _clamp_path_component(
+        cls,
+        text: str,
+        *,
+        max_chars: int = OBSIDIAN_COMPONENT_MAX_CHARS,
+        max_bytes: int = OBSIDIAN_COMPONENT_MAX_BYTES,
+    ) -> str:
+        """Clamp a sanitized filename/folder component on char, word, and UTF-8 byte bounds."""
+        cleaned = text.strip(" .")
+        if len(cleaned) > max_chars:
+            truncated = cleaned[:max_chars]
+            last_space = truncated.rfind(" ")
+            if last_space >= max_chars // 2:
+                truncated = truncated[:last_space]
+            cleaned = truncated.rstrip(" ._-")
+
+        while len(cleaned.encode("utf-8")) > max_bytes and cleaned:
+            cleaned = cleaned[:-1].rstrip(" ._-")
+
+        return cleaned.strip(" .")
+
+    @classmethod
+    def _sanitize_path_component(
+        cls,
+        value: str | None,
+        *,
+        default: str = "",
+        max_chars: int = OBSIDIAN_COMPONENT_MAX_CHARS,
+        max_bytes: int = OBSIDIAN_COMPONENT_MAX_BYTES,
+    ) -> str:
+        """Sanitize a title or filename prefix for macOS, Windows, and Linux."""
+        text = unicodedata.normalize("NFKC", str(value or ""))
+        text = re.sub(r"[\x00-\x1f\x7f/\\:*?\"<>|]+", " ", text)
+        text = re.sub(r"\.{2,}", " ", text)
+        text = re.sub(r"\s+", " ", text).strip(" .")
+
+        if not text:
+            return default
+
+        text = cls._clamp_path_component(text, max_chars=max_chars, max_bytes=max_bytes)
+        if not text:
+            return default
+
+        stem_part, dot, rest = text.partition(".")
+        stem_stripped = stem_part.rstrip(" ")
+        if stem_stripped.upper() in cls._WINDOWS_RESERVED_NAMES:
+            rewritten = f"{stem_stripped}_{dot}{rest}" if dot else f"{stem_stripped}_"
+            text = (
+                cls._clamp_path_component(
+                    rewritten, max_chars=max_chars, max_bytes=max_bytes
+                )
+                or default
+            )
+
+        return text or default
+
+    @classmethod
+    def _sanitize_attachment_prefix(
+        cls, prefix: str | None, *, default: str = "screenshot"
+    ) -> str:
+        """Sanitize user-supplied Screenshot filename prefix, defaulting safely when blank."""
+        return cls._sanitize_path_component(prefix, default=default)
+
+    @staticmethod
+    def _ensure_child_path(parent_dir: Path, child_name: str, *, label: str) -> Path:
+        """Validate ``child_name`` is a direct child inside ``parent_dir`` without escaping."""
+        if (
+            not child_name
+            or "\x00" in child_name
+            or child_name in {".", ".."}
+            or "/" in child_name
+            or "\\" in child_name
+        ):
+            raise ValueError(f"Invalid {label}: {child_name!r}")
+
+        parent_resolved = parent_dir.resolve()
+        candidate_resolved = (parent_dir / child_name).resolve()
+        if candidate_resolved.parent != parent_resolved:
+            raise ValueError(
+                f"Invalid {label} escaping target directory: {child_name!r}"
+            )
+        return parent_dir / child_name
+
+    @staticmethod
+    def _resolve_export_date(export_date: date | datetime | str | None = None) -> str:
+        """Return a strictly validated YYYY-MM-DD date string."""
+        if export_date is None:
+            return datetime.now().strftime("%Y-%m-%d")
+        if isinstance(export_date, datetime):
+            return export_date.strftime("%Y-%m-%d")
+        if isinstance(export_date, date):
+            return export_date.strftime("%Y-%m-%d")
+
+        text = str(export_date).strip()
+        if not text:
+            return datetime.now().strftime("%Y-%m-%d")
+
+        try:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                return date.fromisoformat(text).isoformat()
+            return datetime.fromisoformat(text).strftime("%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid export_date {export_date!r}; expected YYYY-MM-DD."
+            ) from exc
+
+    @staticmethod
+    def _clean_heading_text(raw_heading: str) -> str:
+        """Strip placeholders, Markdown links/images, and simple inline emphasis from a heading."""
+        text = re.sub(r"@@SCREENSHOT_\d+@@", "", raw_heading or "")
+        text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+        text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+        text = text.replace("**", "").replace("__", "").replace("`", "")
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _extract_first_h1_heading(cls, notes_markdown: str) -> str | None:
+        """Extract and sanitize the first '# ' ATX H1 heading outside fenced code blocks."""
+        in_fence = False
+        fence_char = ""
+        fence_len = 0
+
+        for line in (notes_markdown or "").splitlines():
+            stripped = line.lstrip(" ")
+            leading_spaces = len(line) - len(stripped)
+
+            if leading_spaces <= 3:
+                fence_match = re.match(r"^(`{3,}|~{3,})(.*)$", stripped)
+                if fence_match:
+                    marker = fence_match.group(1)
+                    rest = fence_match.group(2)
+                    if not in_fence:
+                        if not (marker[0] == "`" and "`" in rest):
+                            in_fence = True
+                            fence_char = marker[0]
+                            fence_len = len(marker)
+                            continue
+                    elif (
+                        marker[0] == fence_char
+                        and len(marker) >= fence_len
+                        and not rest.strip()
+                    ):
+                        in_fence = False
+                        fence_char = ""
+                        fence_len = 0
+                        continue
+
+            if in_fence or leading_spaces > 3:
+                continue
+
+            h1_match = re.match(r"^#[ \t]+(.+?)\s*$", stripped)
+            if not h1_match:
+                continue
+
+            raw_title = re.sub(r"(?:^|[ \t]+)#+$", "", h1_match.group(1)).strip()
+            cleaned = cls._clean_heading_text(raw_title)
+            sanitized = cls._sanitize_path_component(cleaned, default="")
+            if sanitized:
+                return sanitized
+
+        return None
+
+    @classmethod
+    def _clean_llm_title_response(cls, response_text: str) -> str:
+        """Normalize a Provider title reply into a sanitized single-line title."""
+        for line in (response_text or "").splitlines():
+            candidate = line.strip().strip(" \"'“”‘’`")
+            if not candidate:
+                continue
+            candidate = re.sub(r"^#+\s*", "", candidate)
+            candidate = re.sub(r"^[-*]\s+", "", candidate)
+            candidate = re.sub(r"(?i)^(?:meeting\s+)?title\s*:\s*", "", candidate)
+            candidate = candidate.strip(" \"'“”‘’`")
+            candidate = re.sub(r"^#+\s*", "", candidate)
+            candidate = re.sub(r"^[-*]\s+", "", candidate)
+            candidate = candidate.strip(" \"'“”‘’`").rstrip(".")
+            candidate = cls._clean_heading_text(candidate)
+            sanitized = cls._sanitize_path_component(candidate, default="")
+            if sanitized:
+                return sanitized
+        return ""
+
+    def _resolve_effective_reasoning_effort(
+        self, reasoning_effort: str | None = None
+    ) -> str | None:
+        """Preserve active outer reasoning_effort ContextVar when caller passes None/blank."""
+        explicit = normalize_reasoning_effort(reasoning_effort)
+        if explicit is not None:
+            return explicit
+        return self.llm_service.current_reasoning_effort()
+
+    @classmethod
+    def _obsidian_stage_max_tokens(
+        cls,
+        env_name: str,
+        default: int,
+        reasoning_default: int,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> int:
+        normalized_effort = normalize_reasoning_effort(reasoning_effort)
+        is_reasoning = bool(model and LLMService._is_reasoning_model(model)) or (
+            normalized_effort not in (None, REASONING_EFFORT_NONE)
+        )
+        selected = reasoning_default if is_reasoning else default
+        return cls._positive_int_env(env_name, selected, 128)
+
+    @classmethod
+    def _obsidian_title_max_tokens(
+        cls, model: str | None = None, reasoning_effort: str | None = None
+    ) -> int:
+        return cls._obsidian_stage_max_tokens(
+            "LLM_OBSIDIAN_TITLE_MAX_TOKENS",
+            cls.DEFAULT_OBSIDIAN_TITLE_MAX_TOKENS,
+            cls.DEFAULT_REASONING_OBSIDIAN_TITLE_MAX_TOKENS,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
+    @classmethod
+    def _obsidian_faq_max_tokens(
+        cls, model: str | None = None, reasoning_effort: str | None = None
+    ) -> int:
+        return cls._obsidian_stage_max_tokens(
+            "LLM_OBSIDIAN_FAQ_MAX_TOKENS",
+            cls.DEFAULT_OBSIDIAN_FAQ_MAX_TOKENS,
+            cls.DEFAULT_REASONING_OBSIDIAN_FAQ_MAX_TOKENS,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def _derive_title_with_provider(
+        self,
+        notes_markdown: str,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        output_language: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        """Ask the Provider for a concise meeting title, returning '' on missing config or failure."""
+        if not (base_url or "").strip() or not (model or "").strip():
+            return ""
+
+        excerpt = re.sub(r"@@SCREENSHOT_\d+@@", "", notes_markdown or "").strip()[:8_000]
+        if not excerpt:
+            return ""
+
+        language_hint = (
+            f"Write the title in {output_language.strip()}."
+            if (output_language or "").strip()
+            else "Write the title in the primary language of the meeting notes."
+        )
+        system_prompt = (
+            "You generate concise Obsidian folder titles for meeting notes. "
+            "Output ONLY a short descriptive title (3 to 7 words) in plain text — "
+            "no Markdown headings, no quotes, no trailing punctuation, and no reasoning or commentary."
+        )
+        user_prompt = textwrap.dedent(
+            f"""
+            Derive one concise, descriptive title for these meeting notes.
+            {language_hint}
+
+            Meeting notes:
+            {excerpt}
+            """
+        ).strip()
+
+        effective_effort = self._resolve_effective_reasoning_effort(reasoning_effort)
+        max_tokens = self._obsidian_title_max_tokens(model, effective_effort)
+        try:
+            with self.llm_service.reasoning_effort(effective_effort):
+                raw_reply = self._call_llm_with_length_retry(
+                    [{"role": "user", "content": user_prompt}],
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    max_tokens=max_tokens,
+                    stage="obsidian_title",
+                    system_prompt=system_prompt,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Provider title derivation failed; falling back to source stem: %s", exc
+            )
+            return ""
+
+        return self._clean_llm_title_response(raw_reply)
+
+    @staticmethod
+    def _format_chat_turns_for_faq(turns: list[dict[str, str]]) -> str:
+        lines: list[str] = []
+        for idx, turn in enumerate(turns, start=1):
+            speaker = "User" if turn.get("role") == "user" else "Assistant"
+            lines.append(f"[{idx}] {speaker}: {turn.get('content', '')}")
+        return "\n\n".join(lines)
+
+    @staticmethod
+    def _build_faq_system_prompt(output_language: str | None = None) -> str:
+        lang = (output_language or "").strip()
+        language_instruction = (
+            f"Write the FAQ in {lang}."
+            if lang
+            else "Write the FAQ in the primary language of the Meeting Chat (defaulting to English)."
+        )
+        return textwrap.dedent(
+            f"""
+            You distill Meeting Chat Q&A transcripts into a clean, well-structured Markdown FAQ document for Obsidian.
+            {language_instruction}
+
+            Rules:
+            1. Distill the key questions and answers from the Meeting Chat into clear, self-contained FAQ entries.
+            2. Merge duplicate or follow-up turns about the same topic into one coherent question and answer while preserving factual details, timestamps, screenshot references, owners, and caveats.
+            3. Ground every FAQ entry ONLY in the provided Meeting Chat and Meeting Notes context; do not invent facts beyond what was stated.
+            4. Omit meta-chatter, greetings, or unresolved noise unless they carry substantive meeting information.
+            5. Format the output as clean Markdown using a clear heading (e.g. `## Frequently Asked Questions`) and `### <Question>` subsections.
+            6. CRITICAL: Output ONLY the final Markdown FAQ. Do NOT include any chain-of-thought, reasoning, commentary, or wrapping code fences.
+            """
+        ).strip()
+
+    def _build_faq_distillation_messages(
+        self,
+        *,
+        title: str,
+        notes_markdown: str,
+        filtered_turns: list[dict[str, str]],
+        output_language: str | None,
+        model: str,
+        max_tokens: int,
+        system_prompt: str,
+    ) -> list[dict[str, str]]:
+        cleaned_notes = re.sub(r"@@SCREENSHOT_\d+@@", "", notes_markdown or "").strip()
+        notes_limit = min(len(cleaned_notes), 8_000)
+        turns_slice = list(filtered_turns)
+        lang = (output_language or "").strip()
+        language_hint = (
+            f"Write the FAQ in {lang}."
+            if lang
+            else "Write the FAQ in the primary language of the Meeting Chat (defaulting to English)."
+        )
+
+        def _make_messages(n_limit: int, turns: list[dict[str, str]]) -> list[dict[str, str]]:
+            sections = [
+                f'Distill the following Meeting Chat conversation into a clean, standalone Markdown FAQ for the meeting "{title}".\n{language_hint}'
+            ]
+            notes_excerpt = cleaned_notes[:n_limit].strip() if n_limit > 0 else ""
+            if notes_excerpt:
+                sections.append(
+                    f"Meeting Notes Context (for terminology and accuracy):\n{notes_excerpt}"
+                )
+            sections.append(
+                f"Meeting Chat Transcript:\n{self._format_chat_turns_for_faq(turns)}"
+            )
+            return [{"role": "user", "content": "\n\n".join(sections)}]
+
+        messages = _make_messages(notes_limit, turns_slice)
+        if not self._chat_request_exceeds_budget(
+            messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+        ):
+            return messages
+
+        # Shrink notes excerpt first so all chat turns remain intact when possible.
+        while notes_limit > 0 and self._chat_request_exceeds_budget(
+            messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+        ):
+            notes_limit = notes_limit // 2
+            messages = _make_messages(notes_limit, turns_slice)
+
+        # If chat turns alone still exceed byte budget, trim oldest turns (in pairs when possible)
+        # while always preserving at least one user+assistant exchange.
+        while len(turns_slice) > 1 and self._chat_request_exceeds_budget(
+            messages, model=model, max_tokens=max_tokens, system_prompt=system_prompt
+        ):
+            if (
+                len(turns_slice) >= 2
+                and turns_slice[0].get("role") == "user"
+                and turns_slice[1].get("role") == "assistant"
+            ):
+                next_slice = turns_slice[2:]
+            else:
+                next_slice = turns_slice[1:]
+            if not next_slice:
+                break
+            if any(t.get("role") == "user" for t in turns_slice) and not any(
+                t.get("role") == "user" for t in next_slice
+            ):
+                break
+            if any(t.get("role") == "assistant" for t in turns_slice) and not any(
+                t.get("role") == "assistant" for t in next_slice
+            ):
+                break
+            turns_slice = next_slice
+            messages = _make_messages(notes_limit, turns_slice)
+
+        return messages
+
+    def _distill_chat_faq(
+        self,
+        filtered_turns: list[dict[str, str]],
+        *,
+        title: str,
+        notes_markdown: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        output_language: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str | None:
+        """Distill filtered Meeting Chat turns into clean Markdown FAQ, or None if empty."""
+        if not filtered_turns or not any(
+            t.get("role") == "assistant" and str(t.get("content") or "").strip()
+            for t in filtered_turns
+        ):
+            return None
+
+        if not (base_url or "").strip():
+            raise ValueError("LLM base URL is required to distill Meeting Chat FAQ.")
+        if not (model or "").strip():
+            raise ValueError("Model name is required to distill Meeting Chat FAQ.")
+
+        effective_effort = self._resolve_effective_reasoning_effort(reasoning_effort)
+        max_tokens = self._obsidian_faq_max_tokens(model, effective_effort)
+        system_prompt = self._build_faq_system_prompt(output_language)
+        messages = self._build_faq_distillation_messages(
+            title=title,
+            notes_markdown=notes_markdown,
+            filtered_turns=filtered_turns,
+            output_language=output_language,
+            model=model,
+            max_tokens=max_tokens,
+            system_prompt=system_prompt,
+        )
+
+        with self.llm_service.reasoning_effort(effective_effort):
+            raw_faq = self._call_llm_with_length_retry(
+                messages,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                max_tokens=max_tokens,
+                stage="obsidian_faq",
+                system_prompt=system_prompt,
+            )
+
+        cleaned = (raw_faq or "").strip()
+        return cleaned or None
+
+    def _derive_obsidian_title(
+        self,
+        notes_markdown: str,
+        *,
+        source_stem: str | None = None,
+        base_url: str = "",
+        api_key: str = "",
+        model: str = "",
+        output_language: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> str:
+        """Derive a sanitized meeting title: H1 heading -> Provider -> source_stem -> 'Meeting Notes'."""
+        h1_title = self._extract_first_h1_heading(notes_markdown)
+        if h1_title:
+            return h1_title
+
+        provider_title = self._derive_title_with_provider(
+            notes_markdown,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            output_language=output_language,
+            reasoning_effort=reasoning_effort,
+        )
+        if provider_title:
+            return provider_title
+
+        stem_title = self._sanitize_path_component(source_stem, default="")
+        if stem_title:
+            return stem_title
+
+        return "Meeting Notes"
+
+    @staticmethod
+    def _resolve_obsidian_screenshots(
+        screenshots_dir: str | Path | None,
+        frames_metadata: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Discover existing Screenshot files on disk matching frames_metadata or directory contents."""
+        if screenshots_dir is None or not str(screenshots_dir).strip():
+            return []
+
+        shot_dir = Path(str(screenshots_dir).strip()).expanduser()
+        if not shot_dir.is_dir():
+            return []
+
+        resolved: list[dict[str, Any]] = []
+        if frames_metadata:
+            for i, frame in enumerate(frames_metadata, start=1):
+                if not isinstance(frame, dict):
+                    continue
+                raw_index = frame.get("index")
+                idx = int(raw_index) if raw_index is not None else i
+                found: Path | None = None
+                for ext in (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"):
+                    candidate = shot_dir / f"screenshot_{idx:02d}{ext}"
+                    if candidate.is_file():
+                        found = candidate
+                        break
+                if found is not None:
+                    resolved.append(
+                        {
+                            "index": idx,
+                            "time_str": str(frame.get("time_str") or "").strip(),
+                            "source_path": found,
+                            "ext": found.suffix.lower(),
+                        }
+                    )
+            return resolved
+
+        image_files = [
+            p
+            for p in sorted(shot_dir.iterdir(), key=lambda item: item.name.lower())
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        ]
+        matched_pairs: list[tuple[int, Path]] = []
+        for path in image_files:
+            match = _SCREENSHOT_FILENAME_RE.match(path.name)
+            if match:
+                matched_pairs.append((int(match.group(1)), path))
+
+        if matched_pairs:
+            matched_pairs.sort(key=lambda pair: (pair[0], pair[1].name.lower()))
+            for idx, path in matched_pairs:
+                resolved.append(
+                    {
+                        "index": idx,
+                        "time_str": "",
+                        "source_path": path,
+                        "ext": path.suffix.lower(),
+                    }
+                )
+            return resolved
+
+        for idx, path in enumerate(image_files, start=1):
+            resolved.append(
+                {
+                    "index": idx,
+                    "time_str": "",
+                    "source_path": path,
+                    "ext": path.suffix.lower(),
+                }
+            )
+        return resolved
+
+    @staticmethod
+    def _rewrite_internal_screenshot_links(
+        markdown_text: str,
+        copied_names_by_index: dict[int, str],
+        *,
+        attachment_dir: str = "attachment",
+    ) -> str:
+        """Rewrite ``images/<stem>/screenshot_NN.<ext>`` links to relative attachment links."""
+        if not markdown_text or not copied_names_by_index:
+            return markdown_text
+
+        dir_posix = Path(attachment_dir).as_posix().strip("/")
+        encoded_dir = quote(dir_posix, safe="/") if dir_posix and dir_posix != "." else ""
+
+        def _replace(match: re.Match[str]) -> str:
+            alt_text = match.group(1)
+            idx = int(match.group(3))
+            dest_name = copied_names_by_index.get(idx)
+            if not dest_name:
+                return match.group(0)
+            encoded_name = quote(dest_name, safe="")
+            rel_path = f"{encoded_dir}/{encoded_name}" if encoded_dir else encoded_name
+            return f"![{alt_text}]({rel_path})"
+
+        return _INTERNAL_SCREENSHOT_LINK_RE.sub(_replace, markdown_text)
+
+    def _rewrite_export_markdown(
+        self,
+        notes_body: str,
+        resolved_screenshots: list[dict[str, Any]],
+        *,
+        attachment_prefix: str,
+    ) -> str:
+        """Rewrite both @@SCREENSHOT_N@@ placeholders and internal images/<stem>/ links."""
+        rewrite_frames = [
+            {"index": item["index"], "time_str": item["time_str"]}
+            for item in resolved_screenshots
+        ]
+        exts = {item["ext"] for item in resolved_screenshots}
+        common_ext = next(iter(exts)) if len(exts) == 1 else ".jpg"
+
+        rewritten = self.notes_service.rewrite_screenshot_placeholders(
+            notes_body,
+            rewrite_frames,
+            attachment_dir="attachment",
+            filename_prefix=attachment_prefix,
+            extension=common_ext,
+        )
+
+        if len(exts) > 1:
+            for item in resolved_screenshots:
+                if item["ext"] != common_ext:
+                    idx = item["index"]
+                    wrong_name = quote(f"{attachment_prefix}_{idx:02d}{common_ext}", safe="")
+                    right_name = quote(f"{attachment_prefix}_{idx:02d}{item['ext']}", safe="")
+                    rewritten = rewritten.replace(
+                        f"(attachment/{wrong_name})", f"(attachment/{right_name})"
+                    )
+
+        copied_names_by_index = {
+            item["index"]: f"{attachment_prefix}_{item['index']:02d}{item['ext']}"
+            for item in resolved_screenshots
+        }
+        return self._rewrite_internal_screenshot_links(
+            rewritten, copied_names_by_index, attachment_dir="attachment"
+        )
+
+    @staticmethod
+    def _remove_path_cleanly(path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+
+    @classmethod
+    def _stage_and_swap_attachments(
+        cls,
+        target_dir: Path,
+        resolved_screenshots: list[dict[str, Any]],
+        *,
+        attachment_prefix: str,
+        overwrite: bool,
+    ) -> tuple[Path | None, list[str]]:
+        """Copy Screenshot files non-destructively into staged ``attachment/`` and swap cleanly."""
+        attachment_dir = target_dir / "attachment"
+        if not resolved_screenshots:
+            if overwrite and (attachment_dir.exists() or attachment_dir.is_symlink()):
+                cls._remove_path_cleanly(attachment_dir)
+            return None, []
+
+        staging_dir = Path(
+            tempfile.mkdtemp(dir=target_dir, prefix=".attachment_staging_")
+        )
+        copied_paths: list[str] = []
+        try:
+            for item in resolved_screenshots:
+                dest_name = f"{attachment_prefix}_{item['index']:02d}{item['ext']}"
+                shutil.copy2(item["source_path"], staging_dir / dest_name)
+                copied_paths.append(str(attachment_dir / dest_name))
+
+            if attachment_dir.exists() or attachment_dir.is_symlink():
+                cls._remove_path_cleanly(attachment_dir)
+            staging_dir.rename(attachment_dir)
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+
+        return attachment_dir, copied_paths
+
+    def prepare_obsidian_export(
+        self,
+        vault_path: str | Path,
+        *,
+        meeting_context: dict[str, Any] | None = None,
+        notes_markdown: str | None = None,
+        raw_notes: str | None = None,
+        source_stem: str | None = None,
+        screenshots_dir: str | Path | None = _UNSET,  # type: ignore[assignment]
+        frames_metadata: list[dict[str, Any]] | None = None,
+        chat_history: list | str | None = None,
+        base_url: str = "",
+        api_key: str = "",
+        model: str = "",
+        output_language: str | None = None,
+        reasoning_effort: str | None = None,
+        export_date: date | datetime | str | None = None,
+        attachment_prefix: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate vault, derive naming, inspect collision/screenshots without writing to disk."""
+        vault_dir = self._validate_vault_path(vault_path)
+
+        ctx = meeting_context if isinstance(meeting_context, dict) else {}
+        resolved_notes = ""
+        for candidate in (
+            raw_notes,
+            notes_markdown,
+            ctx.get("raw_notes"),
+            ctx.get("markdown_notes"),
+        ):
+            if candidate is not None and str(candidate).strip():
+                resolved_notes = str(candidate).strip()
+                break
+
+        if not resolved_notes:
+            raise ValueError(
+                "No Meeting Notes available to export. Please generate Meeting Notes first."
+            )
+
+        info = ctx.get("info") if isinstance(ctx.get("info"), dict) else {}
+        info_stem = Path(str(info.get("filename") or "")).stem.strip()
+        raw_source_stem = (source_stem or "").strip() or info_stem or None
+        resolved_source_stem = raw_source_stem or "meeting"
+
+        if screenshots_dir is not _UNSET:
+            raw_shots_dir = screenshots_dir
+        else:
+            raw_shots_dir = ctx.get("screenshots_dir")
+        resolved_screenshots_dir = (
+            str(raw_shots_dir).strip()
+            if raw_shots_dir is not None and str(raw_shots_dir).strip()
+            else None
+        )
+
+        raw_frames_meta = (
+            frames_metadata if frames_metadata is not None else ctx.get("frames_metadata")
+        )
+        clean_frames_metadata = [
+            {
+                "index": int(f["index"]) if f.get("index") is not None else i,
+                "time_str": str(f.get("time_str") or ""),
+                "ocr_text": str(f.get("ocr_text") or "").strip(),
+                "ocr_keywords": list(f.get("ocr_keywords") or []),
+            }
+            for i, f in enumerate(raw_frames_meta or [], start=1)
+            if isinstance(f, dict)
+        ]
+
+        resolved_export_date = self._resolve_export_date(export_date)
+        ctx_language = str(ctx.get("output_language") or "").strip() or None
+        effective_language = (output_language or "").strip() or ctx_language
+        filtered_chat = self._filter_chat_history_for_faq(chat_history)
+        title = self._derive_obsidian_title(
+            resolved_notes,
+            source_stem=raw_source_stem,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            output_language=effective_language,
+            reasoning_effort=reasoning_effort,
+        )
+
+        folder_name = f"{resolved_export_date} {title}"
+        target_dir = self._ensure_child_path(vault_dir, folder_name, label="folder_name")
+        notes_filename = f"{folder_name}.md"
+        faq_filename = f"{folder_name} - FAQ.md"
+        exists = bool(target_dir.exists() or target_dir.is_symlink())
+        sanitized_prefix = self._sanitize_attachment_prefix(attachment_prefix)
+
+        resolved_screenshots = self._resolve_obsidian_screenshots(
+            resolved_screenshots_dir, clean_frames_metadata
+        )
+
+        faq_markdown = self._distill_chat_faq(
+            filtered_chat,
+            title=title,
+            notes_markdown=resolved_notes,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            output_language=effective_language,
+            reasoning_effort=reasoning_effort,
+        )
+
+        return {
+            "vault_path": str(vault_dir),
+            "folder_name": folder_name,
+            "target_dir": str(target_dir),
+            "notes_filename": notes_filename,
+            "faq_filename": faq_filename,
+            "exists": exists,
+            "faq_markdown": faq_markdown,
+            "screenshot_count": len(resolved_screenshots),
+            "default_attachment_prefix": sanitized_prefix,
+            "title": title,
+            "export_date": resolved_export_date,
+            "source_stem": resolved_source_stem,
+            "raw_notes": resolved_notes,
+            "screenshots_dir": resolved_screenshots_dir,
+            "frames_metadata": clean_frames_metadata,
+        }
+
+    def export_to_obsidian(
+        self,
+        prepared: dict[str, Any] | None = None,
+        *,
+        vault_path: str | Path | None = None,
+        folder_name: str | None = None,
+        notes_markdown: str | None = None,
+        raw_notes: str | None = None,
+        source_stem: str | None = None,
+        screenshots_dir: str | Path | None = _UNSET,  # type: ignore[assignment]
+        frames_metadata: list[dict[str, Any]] | None = None,
+        notes_filename: str | None = None,
+        faq_filename: str | None = None,
+        attachment_prefix: str | None = None,
+        faq_markdown: str | None = _UNSET,  # type: ignore[assignment]
+        overwrite: bool = False,
+        export_date: date | datetime | str | None = None,
+    ) -> dict[str, Any]:
+        """Write Meeting Notes, Attachments, and optional FAQ into the Obsidian vault."""
+        prep = dict(prepared) if isinstance(prepared, dict) else {}
+
+        raw_vault_path = vault_path if vault_path is not None else prep.get("vault_path")
+        vault_dir = self._validate_vault_path(raw_vault_path)
+
+        resolved_notes = ""
+        for candidate in (
+            raw_notes,
+            notes_markdown,
+            prep.get("raw_notes"),
+            prep.get("notes_markdown"),
+        ):
+            if candidate is not None and str(candidate).strip():
+                resolved_notes = str(candidate).strip()
+                break
+
+        if not resolved_notes:
+            raise ValueError(
+                "No Meeting Notes available to export. Please generate Meeting Notes first."
+            )
+
+        raw_source_stem = (
+            (source_stem or "").strip()
+            or str(prep.get("source_stem") or "").strip()
+            or None
+        )
+
+        if screenshots_dir is not _UNSET:
+            raw_shots_dir = screenshots_dir
+        else:
+            raw_shots_dir = prep.get("screenshots_dir")
+        resolved_screenshots_dir = (
+            str(raw_shots_dir).strip()
+            if raw_shots_dir is not None and str(raw_shots_dir).strip()
+            else None
+        )
+
+        resolved_frames_metadata = (
+            frames_metadata
+            if frames_metadata is not None
+            else prep.get("frames_metadata")
+        )
+
+        raw_export_date = (
+            export_date if export_date is not None else prep.get("export_date")
+        )
+        resolved_export_date = self._resolve_export_date(raw_export_date)
+
+        if folder_name is not None and str(folder_name).strip():
+            resolved_folder_name = str(folder_name).strip()
+        elif prep.get("folder_name") and str(prep.get("folder_name")).strip():
+            resolved_folder_name = str(prep["folder_name"]).strip()
+        else:
+            title = self._derive_obsidian_title(
+                resolved_notes, source_stem=raw_source_stem
+            )
+            resolved_folder_name = f"{resolved_export_date} {title}"
+
+        target_dir = self._ensure_child_path(
+            vault_dir, resolved_folder_name, label="folder_name"
+        )
+
+        raw_notes_fn = (
+            notes_filename
+            if (notes_filename is not None and str(notes_filename).strip())
+            else (prep.get("notes_filename") or f"{resolved_folder_name}.md")
+        )
+        notes_path = self._ensure_child_path(
+            target_dir, str(raw_notes_fn).strip(), label="notes_filename"
+        )
+
+        raw_faq_fn = (
+            faq_filename
+            if (faq_filename is not None and str(faq_filename).strip())
+            else (prep.get("faq_filename") or f"{resolved_folder_name} - FAQ.md")
+        )
+        faq_path = self._ensure_child_path(
+            target_dir, str(raw_faq_fn).strip(), label="faq_filename"
+        )
+
+        raw_prefix = (
+            attachment_prefix
+            if attachment_prefix is not None
+            else prep.get("default_attachment_prefix")
+        )
+        sanitized_prefix = self._sanitize_attachment_prefix(raw_prefix)
+
+        raw_faq = prep.get("faq_markdown") if faq_markdown is _UNSET else faq_markdown
+        clean_faq = str(raw_faq).strip() if raw_faq is not None else ""
+
+        existed_before = bool(target_dir.exists() or target_dir.is_symlink())
+        if existed_before and not overwrite:
+            return {
+                "status": "conflict",
+                "written": False,
+                "exported": False,
+                "exists": True,
+                "overwritten": False,
+                "vault_path": str(vault_dir),
+                "folder_name": resolved_folder_name,
+                "target_dir": str(target_dir),
+                "notes_filename": notes_path.name,
+                "notes_path": None,
+                "faq_filename": faq_path.name,
+                "faq_path": None,
+                "attachment_dir": None,
+                "attachment_prefix": sanitized_prefix,
+                "screenshots_copied": 0,
+                "screenshot_count": 0,
+                "copied_screenshots": [],
+                "error": (
+                    f"Target meeting folder already exists: {target_dir}. "
+                    "Confirm overwrite to replace exported files."
+                ),
+                "message": (
+                    f"Target meeting folder already exists: {target_dir}. "
+                    "Confirm overwrite (overwrite=True) to replace exported files."
+                ),
+            }
+
+        if existed_before and not target_dir.is_dir():
+            raise NotADirectoryError(
+                f"Target Obsidian path exists and is not a directory: {target_dir}"
+            )
+
+        resolved_screenshots = self._resolve_obsidian_screenshots(
+            resolved_screenshots_dir, resolved_frames_metadata
+        )
+        rewritten_notes = self._rewrite_export_markdown(
+            resolved_notes, resolved_screenshots, attachment_prefix=sanitized_prefix
+        )
+        final_notes = (
+            f"{rewritten_notes.rstrip()}\n" if rewritten_notes.strip() else ""
+        )
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        attachment_dir, copied_screenshots = self._stage_and_swap_attachments(
+            target_dir,
+            resolved_screenshots,
+            attachment_prefix=sanitized_prefix,
+            overwrite=overwrite,
+        )
+
+        notes_path.write_text(final_notes, encoding="utf-8")
+
+        if clean_faq:
+            if overwrite and (faq_path.is_symlink() or faq_path.is_dir()):
+                self._remove_path_cleanly(faq_path)
+            faq_path.write_text(f"{clean_faq}\n", encoding="utf-8")
+            wrote_faq = True
+        else:
+            if overwrite and (faq_path.exists() or faq_path.is_symlink()):
+                self._remove_path_cleanly(faq_path)
+            wrote_faq = False
+
+        return {
+            "status": "exported",
+            "written": True,
+            "exported": True,
+            "exists": existed_before,
+            "overwritten": bool(existed_before and overwrite),
+            "vault_path": str(vault_dir),
+            "folder_name": resolved_folder_name,
+            "target_dir": str(target_dir),
+            "notes_filename": notes_path.name,
+            "notes_path": str(notes_path),
+            "faq_filename": faq_path.name,
+            "faq_path": str(faq_path) if wrote_faq else None,
+            "attachment_dir": str(attachment_dir) if attachment_dir is not None else None,
+            "attachment_prefix": sanitized_prefix,
+            "screenshots_copied": len(copied_screenshots),
+            "screenshot_count": len(copied_screenshots),
+            "copied_screenshots": copied_screenshots,
+            "message": f"Exported Meeting Notes to {target_dir}.",
+        }
+
