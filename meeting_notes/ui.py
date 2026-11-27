@@ -242,6 +242,11 @@ html body {
 .results-container {
     width: 100%;
 }
+/* Obsidian export: spacing, aligned rows, no button text wrapping */
+.obsidian-export-accordion { margin-top: 16px !important; width: 100%; }
+.obsidian-export-row { align-items: flex-end !important; gap: 12px !important; flex-wrap: wrap !important; }
+.obsidian-export-row > button { white-space: nowrap !important; flex: 0 0 auto !important; width: fit-content !important; min-width: 110px !important; }
+.obsidian-export-row > .form { flex: 1 1 260px !important; min-width: min(260px, 100%) !important; }
 /* Screenshots Gallery */
 .screenshots-gallery,
 .screenshots-gallery .gallery-container,
@@ -263,11 +268,19 @@ html body {
 .rendered-notes-html {
     background: var(--background-fill-primary) !important;
     color: var(--body-text-color) !important;
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    max-height: none !important;
+    overflow: visible !important;
+}
+.rendered-notes-html .html-container {
+    box-sizing: border-box;
     padding: 20px !important;
-    border-radius: 8px;
-    border: 1px solid var(--border-color-primary, #cbd5e1);
     max-height: 68vh;
     overflow-y: auto;
+    overflow-x: hidden;
+    border-radius: 8px;
 }
 .rendered-notes-html,
 .rendered-notes-html h1,
@@ -1826,7 +1839,7 @@ class MeetingNotesApp:
                             elem_id="obsidian-export-accordion",
                             elem_classes=["obsidian-export-accordion"],
                         ) as obsidian_export_accordion:
-                            with gr.Row():
+                            with gr.Row(elem_classes=["obsidian-export-row"]):
                                 obsidian_vault_input = gr.Textbox(
                                     label="Obsidian Vault Path",
                                     placeholder="/path/to/Obsidian/Vault",
@@ -1842,7 +1855,7 @@ class MeetingNotesApp:
                                     min_width=110,
                                     elem_id="obsidian-browse-btn",
                                 )
-                            with gr.Row():
+                            with gr.Row(elem_classes=["obsidian-export-row"]):
                                 obsidian_prefix_input = gr.Textbox(
                                     label="Screenshot Prefix",
                                     value="screenshot",
@@ -1879,7 +1892,7 @@ class MeetingNotesApp:
                                 placeholder="Distilled Meeting Chat FAQ will appear here when Meeting Chat has conversation turns.",
                                 elem_id="obsidian-faq-preview",
                             )
-                            with gr.Row():
+                            with gr.Row(elem_classes=["obsidian-export-row"]):
                                 obsidian_confirm_btn = gr.Button(
                                     "Confirm & Export to Obsidian",
                                     variant="primary",
