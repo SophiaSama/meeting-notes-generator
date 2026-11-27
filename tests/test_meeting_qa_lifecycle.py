@@ -356,7 +356,11 @@ def test_clear_chat_resets_only_conversation_and_input_while_preserving_context(
     # Generated artifacts and meeting_context remain untouched and usable.
     assert Path(out_path).exists()
     assert "PostgreSQL 16" in notes_text
-    assert html_notes.startswith("<!DOCTYPE html>")
+    # The in-app pane gets an embeddable fragment: no document shell, global <style>,
+    # or theme/mode picker <select>s (those masked the notes text in the live UI).
+    assert "<h1>" in html_notes
+    assert "<!DOCTYPE" not in html_notes and "<style" not in html_notes
+    assert "theme-picker" not in html_notes and "<select" not in html_notes
     assert thumbnails == []
     assert meeting_context["info"]["filename"] == "design_review.transcript.txt"
 
