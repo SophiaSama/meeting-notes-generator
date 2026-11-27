@@ -83,6 +83,44 @@ class NotesService:
             output.append("</ul>")
         return "\n".join(output)
 
+    def rewrite_screenshot_placeholders(
+        self,
+        markdown_notes: str,
+        frames: list[dict],
+        *,
+        attachment_dir: str | Path = "attachment",
+        filename_prefix: str = "screenshot",
+        extension: str = ".jpg",
+    ) -> str:
+        """Replace @@SCREENSHOT_N@@ placeholders with URL-encoded Markdown image links."""
+        prefix = (filename_prefix or "").strip() or "screenshot"
+        ext = extension if extension.startswith(".") else f".{extension}"
+
+        dir_posix = (
+            Path(attachment_dir).as_posix().rstrip("/")
+            if attachment_dir is not None
+            else ""
+        )
+        encoded_dir = "" if dir_posix in ("", ".") else quote(dir_posix, safe="/")
+
+        body = markdown_notes or ""
+        for i, frame in enumerate(frames):
+            raw_index = frame.get("index")
+            idx = int(raw_index) if raw_index is not None else (i + 1)
+            placeholder = f"@@SCREENSHOT_{idx}@@"
+
+            encoded_filename = quote(f"{prefix}_{idx:02d}{ext}", safe="")
+            rel_path = f"{encoded_dir}/{encoded_filename}" if encoded_dir else encoded_filename
+
+            time_str = str(frame.get("time_str") or "").strip()
+            caption = f"Screenshot at {time_str}" if time_str else f"Screenshot {idx}"
+            img_md = f"![{caption}]({rel_path})\n\n*{caption}*"
+            body = body.replace(placeholder, img_md)
+
+        # Remove any leftover placeholders the model emitted without a matching frame.
+        body = re.sub(r"@@SCREENSHOT_\d+@@", "", body)
+        return body
+
     def build_markdown_notes(
         self,
         markdown_notes: str,
@@ -90,27 +128,39 @@ class NotesService:
         info: dict,
         images_dir: Path,
         markdown_dir: Path,
+        *,
+        attachment_dir: str | Path | None = None,
+        filename_prefix: str = "screenshot",
     ) -> str:
         """Save screenshots to disk and replace @@SCREENSHOT_N@@ placeholders with image links."""
-        stem = info["filename"].rsplit(".", 1)[0]
-        shot_dir = images_dir / stem
-        shot_dir.mkdir(parents=True, exist_ok=True)
+        prefix = (filename_prefix or "").strip() or "screenshot"
+        if attachment_dir is None:
+            stem = info["filename"].rsplit(".", 1)[0]
+            shot_dir = images_dir / stem
+            rel_dir = shot_dir.relative_to(markdown_dir).as_posix()
+        else:
+            att_path = Path(attachment_dir)
+            if att_path.is_absolute():
+                shot_dir = att_path
+                rel_dir = shot_dir.relative_to(markdown_dir).as_posix()
+            else:
+                shot_dir = Path(markdown_dir) / att_path
+                rel_dir = att_path.as_posix()
 
-        body = markdown_notes
-        for i, frame in enumerate(frames):
-            placeholder = f"@@SCREENSHOT_{i + 1}@@"
-            image_path = shot_dir / f"screenshot_{i + 1:02d}.jpg"
-            frame["pil_image"].save(image_path, format="JPEG", quality=72)
+        if frames:
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            for i, frame in enumerate(frames):
+                raw_index = frame.get("index")
+                idx = int(raw_index) if raw_index is not None else (i + 1)
+                image_path = shot_dir / f"{prefix}_{idx:02d}.jpg"
+                frame["pil_image"].save(image_path, format="JPEG", quality=72)
 
-            rel_path = Path(image_path).relative_to(markdown_dir).as_posix()
-            rel_path = quote(rel_path)
-            caption = f"Screenshot at {frame['time_str']}"
-            img_md = f"![{caption}]({rel_path})\n\n*{caption}*"
-            body = body.replace(placeholder, img_md)
-
-        # Remove any leftover placeholders the model emitted without a matching frame.
-        body = re.sub(r"@@SCREENSHOT_\d+@@", "", body)
-        return body
+        return self.rewrite_screenshot_placeholders(
+            markdown_notes,
+            frames,
+            attachment_dir=rel_dir,
+            filename_prefix=prefix,
+        )
 
     def build_html_notes(
         self,

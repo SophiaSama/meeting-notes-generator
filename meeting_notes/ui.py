@@ -1,5 +1,10 @@
 import os
+from pathlib import Path
+import re
+import shutil
 import socket
+import subprocess
+import sys
 import time
 from typing import Any, Callable
 
@@ -28,6 +33,9 @@ from .views import (
     complete_generation,
     fail_generation,
     format_elapsed_time,
+    format_obsidian_export_success,
+    format_obsidian_overwrite_warning,
+    format_obsidian_prepare_status,
     format_stage_progress,
     map_progress_to_stage,
     render_empty_state,
@@ -273,6 +281,9 @@ html body {
 .rendered-notes-html strong,
 .rendered-notes-html code {
     color: var(--body-text-color) !important;
+}
+.rendered-notes-html article h2 {
+    text-transform: none !important;
 }
 .rendered-notes-html .meta,
 .rendered-notes-html figcaption {
@@ -709,6 +720,81 @@ COPY_MARKDOWN_JS = """(text) => {
 }"""
 
 
+_TK_FOLDER_PICKER_SCRIPT = (
+    "import sys, tkinter as tk\n"
+    "from tkinter import filedialog\n"
+    "root = tk.Tk()\n"
+    "root.withdraw()\n"
+    "try:\n"
+    "    root.attributes('-topmost', True)\n"
+    "except Exception:\n"
+    "    pass\n"
+    "init_dir = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else None\n"
+    "chosen = filedialog.askdirectory(title='Select Obsidian Vault folder', initialdir=init_dir)\n"
+    "root.destroy()\n"
+    "if not chosen:\n"
+    "    sys.stderr.write('User canceled\\n')\n"
+    "    sys.exit(1)\n"
+    "print(chosen)\n"
+)
+
+_MACOS_FOLDER_PICKER_SCRIPT = (
+    'use framework "AppKit"\n'
+    'use framework "Foundation"\n'
+    "on run argv\n"
+    "  set appInst to current application's NSApplication's |sharedApplication|()\n"
+    "  appInst's |setActivationPolicy|:(current application's NSApplicationActivationPolicyAccessory)\n"
+    "  set panel to current application's NSOpenPanel's |openPanel|()\n"
+    '  panel\'s |setTitle|:"Select Obsidian Vault folder"\n'
+    '  panel\'s |setMessage|:"Select Obsidian Vault folder"\n'
+    '  panel\'s |setPrompt|:"Select"\n'
+    "  panel's |setCanChooseFiles|:false\n"
+    "  panel's |setCanChooseDirectories|:true\n"
+    "  panel's |setCanCreateDirectories|:true\n"
+    "  panel's |setAllowsMultipleSelection|:false\n"
+    "  set behavior to ((current application's NSWindowCollectionBehaviorCanJoinAllSpaces) as integer)"
+    " + ((current application's NSWindowCollectionBehaviorFullScreenAuxiliary) as integer)\n"
+    "  panel's |setCollectionBehavior|:behavior\n"
+    "  panel's |setFloatingPanel|:true\n"
+    "  panel's |setLevel|:(current application's NSModalPanelWindowLevel)\n"
+    '  if (count of argv) > 0 and item 1 of argv is not "" then\n'
+    "    set dirURL to current application's NSURL's |fileURLWithPath|:(item 1 of argv)\n"
+    "    panel's |setDirectoryURL|:dirURL\n"
+    "  end if\n"
+    '  if (count of argv) > 1 and item 2 of argv is "--dry-run" then\n'
+    "    set probeURL to panel's |URL|()\n"
+    "    set checkURL to panel's |directoryURL|()\n"
+    "    return ((checkURL's |path|()) as text)\n"
+    "  end if\n"
+    "  appInst's |activateIgnoringOtherApps|:true\n"
+    "  panel's |makeKeyAndOrderFront|:(missing value)\n"
+    "  set resp to panel's |runModal|()\n"
+    "  if (resp as integer) is 1 then\n"
+    "    set pickedURL to panel's |URL|()\n"
+    "    if pickedURL is missing value then\n"
+    "      error number -128\n"
+    "    end if\n"
+    "    return ((pickedURL's |path|()) as text)\n"
+    "  else\n"
+    "    error number -128\n"
+    "  end if\n"
+    "end run\n"
+)
+
+_WINDOWS_FOLDER_PICKER_SCRIPT = (
+    "Add-Type -AssemblyName System.Windows.Forms; "
+    "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
+    "$dlg.Description = 'Select Obsidian Vault folder'; "
+    "$dlg.ShowNewFolderButton = $true; "
+    "if ($env:MEETING_NOTES_PICKER_INIT_DIR -and "
+    "(Test-Path -LiteralPath $env:MEETING_NOTES_PICKER_INIT_DIR -PathType Container)) { "
+    "$dlg.SelectedPath = $env:MEETING_NOTES_PICKER_INIT_DIR }; "
+    "if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
+    "Write-Output $dlg.SelectedPath } else { "
+    "[Console]::Error.WriteLine('User canceled'); exit 1 }"
+)
+
+
 class StageProgressTracker:
     """Non-invasive progress adapter wrapping Gradio's progress callable.
 
@@ -1052,13 +1138,30 @@ class MeetingNotesApp:
         return (
             state.thumbnails,
             state.notes_text,
-            to_embedded_html(state.html_notes),
+            self._wrap_html_preview(to_embedded_html(state.html_notes)),
             state.out_path,
             state.meeting_context,
             [],
             "",
             *self._adapt_results_updates(state),
         )
+
+    @staticmethod
+    def _wrap_html_preview(html_notes: str) -> str:
+        """Ensure rendered Meeting Notes HTML exposes an <article> element inside gr.HTML."""
+        if not html_notes or not html_notes.strip():
+            return html_notes
+        if "<article" in html_notes.lower():
+            return html_notes
+        if re.search(r"<body[^>]*>.*</body>", html_notes, flags=re.IGNORECASE | re.DOTALL):
+            return re.sub(
+                r"(<body[^>]*>)(.*)(</body>)",
+                lambda m: f'{m.group(1)}<article class="meeting-notes-article">{m.group(2).strip()}</article>{m.group(3)}',
+                html_notes,
+                count=1,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        return f'<article class="meeting-notes-article">{html_notes}</article>'
 
     def _on_chat_submit(
         self,
@@ -1124,6 +1227,347 @@ class MeetingNotesApp:
             gr.update(value=8, visible=True),
         )
 
+    def _has_exportable_notes(self, meeting_context: Any) -> bool:
+        """Return True iff meeting_context is valid and contains non-empty Meeting Notes."""
+        if not isinstance(meeting_context, dict):
+            return False
+        if not self.pipeline_service._is_valid_meeting_context(meeting_context):
+            return False
+        return bool(
+            str(meeting_context.get("raw_notes") or "").strip()
+            or str(meeting_context.get("markdown_notes") or "").strip()
+        )
+
+    @staticmethod
+    def _normalize_picked_directory(raw_stdout: str) -> str:
+        """Trim picker stdout and remove trailing path separators except filesystem roots."""
+        picked = (raw_stdout or "").strip()
+        if not picked:
+            return ""
+        if len(picked) > 1 and picked.endswith(("/", "\\")):
+            if not (len(picked) == 3 and picked[1] == ":" and picked[2] in ("/", "\\")):
+                picked = picked.rstrip("/\\") or picked[0]
+        return picked
+
+    @staticmethod
+    def _build_folder_picker_command(
+        current_vault_path: str = "",
+    ) -> tuple[list[str], dict[str, str] | None]:
+        """Build a cross-platform short-lived subprocess command for selecting a folder."""
+        initial_dir = ""
+        candidate = (str(current_vault_path) if current_vault_path is not None else "").strip()
+        if candidate:
+            try:
+                expanded = Path(candidate).expanduser()
+                if expanded.is_dir():
+                    initial_dir = str(expanded)
+            except (OSError, ValueError, RuntimeError):
+                initial_dir = ""
+
+        if sys.platform == "darwin":
+            cmd = ["osascript", "-e", _MACOS_FOLDER_PICKER_SCRIPT]
+            if initial_dir:
+                cmd.append(initial_dir)
+            return cmd, None
+
+        if sys.platform.startswith("win"):
+            powershell_exe = (
+                shutil.which("powershell")
+                or shutil.which("pwsh")
+                or "powershell"
+            )
+            cmd = [
+                powershell_exe,
+                "-NoProfile",
+                "-NonInteractive",
+                "-STA",
+                "-Command",
+                _WINDOWS_FOLDER_PICKER_SCRIPT,
+            ]
+            env = os.environ.copy()
+            if initial_dir:
+                env["MEETING_NOTES_PICKER_INIT_DIR"] = initial_dir
+            return cmd, env
+
+        zenity = shutil.which("zenity")
+        if zenity:
+            cmd = [
+                zenity,
+                "--file-selection",
+                "--directory",
+                "--title=Select Obsidian Vault folder",
+            ]
+            if initial_dir:
+                cmd.append(f"--filename={initial_dir.rstrip('/')}/")
+            return cmd, None
+
+        kdialog = shutil.which("kdialog")
+        if kdialog:
+            start_dir = initial_dir
+            if not start_dir:
+                try:
+                    start_dir = str(Path.home())
+                except (OSError, RuntimeError):
+                    start_dir = ""
+            cmd = [kdialog, "--getexistingdirectory"]
+            if start_dir:
+                cmd.append(start_dir)
+            cmd.extend(["--title", "Select Obsidian Vault folder"])
+            return cmd, None
+
+        cmd = [sys.executable, "-c", _TK_FOLDER_PICKER_SCRIPT]
+        if initial_dir:
+            cmd.append(initial_dir)
+        return cmd, None
+
+    def _on_obsidian_browse(self, current_vault_path: str = ""):
+        """Open a native OS folder picker in a short-lived subprocess with manual fallback."""
+        try:
+            cmd, env = self._build_folder_picker_command(current_vault_path)
+            run_kwargs: dict[str, Any] = {
+                "capture_output": True,
+                "text": True,
+                "timeout": 60,
+            }
+            if env is not None:
+                run_kwargs["env"] = env
+            result = subprocess.run(cmd, **run_kwargs)
+        except subprocess.TimeoutExpired:
+            return (
+                gr.update(),
+                gr.update(
+                    value="Folder picker timed out. Enter or paste the Obsidian Vault Path manually.",
+                    visible=True,
+                ),
+            )
+        except Exception:
+            return (
+                gr.update(),
+                gr.update(
+                    value="Native folder picker unavailable in this environment. Enter or paste the Obsidian Vault Path manually.",
+                    visible=True,
+                ),
+            )
+
+        returncode = getattr(result, "returncode", 1)
+        if returncode == 0:
+            picked = self._normalize_picked_directory(getattr(result, "stdout", "") or "")
+            if picked:
+                return (
+                    gr.update(value=picked),
+                    gr.update(value=f"Selected Obsidian Vault Path: `{picked}`", visible=True),
+                )
+            return (
+                gr.update(),
+                gr.update(
+                    value="No folder selected. Enter or paste the Obsidian Vault Path manually.",
+                    visible=True,
+                ),
+            )
+
+        stderr_lower = (getattr(result, "stderr", "") or "").strip().lower()
+        is_user_cancel = (
+            "cancel" in stderr_lower
+            or "-128" in stderr_lower
+            or (not stderr_lower and returncode == 1)
+        )
+        if is_user_cancel:
+            return (
+                gr.update(),
+                gr.update(
+                    value="Folder selection canceled. Existing Obsidian Vault Path kept.",
+                    visible=True,
+                ),
+            )
+
+        return (
+            gr.update(),
+            gr.update(
+                value="Native folder picker unavailable in this environment. Enter or paste the Obsidian Vault Path manually.",
+                visible=True,
+            ),
+        )
+
+    def _on_obsidian_prepare(
+        self,
+        vault_path: str,
+        attachment_prefix: str,
+        meeting_context: Any,
+        chat_history: Any,
+        base_url: str,
+        api_key: str,
+        model: str,
+        output_language: str | None = None,
+        reasoning_effort: str | None = None,
+    ):
+        """Validate MeetingContext, run prepare_obsidian_export, and reveal preview/confirmation controls."""
+        if not self._has_exportable_notes(meeting_context):
+            return (
+                None,
+                gr.update(
+                    value="Please generate Meeting Notes first before preparing an Obsidian export.",
+                    visible=True,
+                ),
+                gr.update(value="", visible=False),
+                gr.update(value="", visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+            )
+
+        try:
+            prepared = self.pipeline_service.prepare_obsidian_export(
+                vault_path,
+                meeting_context=meeting_context,
+                chat_history=chat_history,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                output_language=output_language,
+                reasoning_effort=reasoning_effort,
+                attachment_prefix=attachment_prefix,
+            )
+        except Exception as exc:
+            return (
+                None,
+                gr.update(value=f"⚠️ Could not prepare Obsidian export: {exc}", visible=True),
+                gr.update(value="", visible=False),
+                gr.update(value="", visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+            )
+
+        faq_md = str(prepared.get("faq_markdown") or "").strip()
+        has_faq = bool(faq_md)
+        exists = bool(prepared.get("exists"))
+
+        return (
+            prepared,
+            gr.update(value=format_obsidian_prepare_status(prepared), visible=True),
+            (
+                gr.update(
+                    value=format_obsidian_overwrite_warning(str(prepared.get("target_dir") or "")),
+                    visible=True,
+                )
+                if exists
+                else gr.update(value="", visible=False)
+            ),
+            (
+                gr.update(value=faq_md, visible=True, interactive=True)
+                if has_faq
+                else gr.update(value="", visible=False, interactive=True)
+            ),
+            gr.update(visible=True, interactive=True),
+            gr.update(visible=True, interactive=True),
+        )
+
+    def _on_obsidian_confirm(
+        self,
+        pending_export: Any,
+        attachment_prefix: str,
+        faq_markdown: str,
+    ):
+        """Confirm and write the prepared Obsidian export using session-isolated gr.State."""
+        if not isinstance(pending_export, dict) or not pending_export.get("vault_path"):
+            return (
+                None,
+                gr.update(
+                    value="No prepared Obsidian export found. Click Prepare Obsidian Export first.",
+                    visible=True,
+                ),
+                gr.update(value="", visible=False),
+                gr.update(value="", visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+            )
+
+        overwrite = bool(pending_export.get("exists", False))
+        cleaned_faq = faq_markdown if (faq_markdown is not None and str(faq_markdown).strip()) else ""
+
+        try:
+            result = self.pipeline_service.export_to_obsidian(
+                pending_export,
+                attachment_prefix=attachment_prefix,
+                faq_markdown=cleaned_faq,
+                overwrite=overwrite,
+            )
+        except Exception as exc:
+            return (
+                pending_export,
+                gr.update(value=f"⚠️ Obsidian export failed: {exc}", visible=True),
+                gr.update(),
+                gr.update(),
+                gr.update(visible=True, interactive=True),
+                gr.update(visible=True, interactive=True),
+            )
+
+        if result.get("status") == "conflict" or not result.get("written"):
+            updated_pending = {**pending_export, "exists": True}
+            target_dir = str(result.get("target_dir") or pending_export.get("target_dir") or "")
+            return (
+                updated_pending,
+                gr.update(
+                    value="Target folder state changed before export. Review the warning below and confirm again or Cancel.",
+                    visible=True,
+                ),
+                gr.update(
+                    value=format_obsidian_overwrite_warning(target_dir),
+                    visible=True,
+                ),
+                gr.update(),
+                gr.update(visible=True, interactive=True),
+                gr.update(visible=True, interactive=True),
+            )
+
+        return (
+            None,
+            gr.update(value=format_obsidian_export_success(result), visible=True),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+        )
+
+    @staticmethod
+    def _on_obsidian_cancel():
+        """Discard pending Obsidian export state without calling PipelineService or writing disk."""
+        return (
+            None,
+            gr.update(value="Obsidian export canceled. No files were written or modified.", visible=True),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+        )
+
+    def _on_obsidian_after_generate(self, meeting_context: Any):
+        """Sync Obsidian prepare guard and clear any stale pending export after generation."""
+        can_export = self._has_exportable_notes(meeting_context)
+        return (
+            None,
+            gr.update(interactive=can_export),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+        )
+
+    @staticmethod
+    def _on_obsidian_reset():
+        """Reset Obsidian export controls and clear session-isolated pending export state."""
+        return (
+            None,
+            gr.update(value=""),
+            gr.update(value="screenshot"),
+            gr.update(interactive=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+            gr.update(value="", visible=False),
+            gr.update(open=False),
+        )
+
     @staticmethod
     def find_available_port(start: int = 7860, end: int = 7870, host: str = "127.0.0.1") -> int:
         for port in range(start, end + 1):
@@ -1139,6 +1583,8 @@ class MeetingNotesApp:
         with gr.Blocks(title="Meeting Notes Helper") as demo:
             meeting_context_state = gr.State(value=None)
             self.meeting_context_state = meeting_context_state
+            obsidian_export_state = gr.State(value=None)
+            self.obsidian_export_state = obsidian_export_state
 
             is_configured = bool(self.defaults.api_key and self.defaults.api_key.strip())
             with gr.Row(elem_classes="title-row"):
@@ -1374,6 +1820,81 @@ class MeetingNotesApp:
                                         show_progress="hidden",
                                     )
 
+                        with gr.Accordion(
+                            "Export to Obsidian",
+                            open=False,
+                            elem_id="obsidian-export-accordion",
+                            elem_classes=["obsidian-export-accordion"],
+                        ) as obsidian_export_accordion:
+                            with gr.Row():
+                                obsidian_vault_input = gr.Textbox(
+                                    label="Obsidian Vault Path",
+                                    placeholder="/path/to/Obsidian/Vault",
+                                    info="Local Obsidian vault folder where Meeting Notes will be saved.",
+                                    interactive=True,
+                                    scale=4,
+                                    elem_id="obsidian-vault-input",
+                                )
+                                obsidian_browse_btn = gr.Button(
+                                    "Browse...",
+                                    variant="secondary",
+                                    scale=0,
+                                    min_width=110,
+                                    elem_id="obsidian-browse-btn",
+                                )
+                            with gr.Row():
+                                obsidian_prefix_input = gr.Textbox(
+                                    label="Screenshot Prefix",
+                                    value="screenshot",
+                                    placeholder="screenshot",
+                                    info="Filename prefix for exported Screenshot files inside attachment/.",
+                                    interactive=True,
+                                    scale=3,
+                                    elem_id="obsidian-prefix-input",
+                                )
+                                obsidian_prepare_btn = gr.Button(
+                                    "Prepare Obsidian Export",
+                                    variant="primary",
+                                    interactive=False,
+                                    scale=0,
+                                    elem_id="obsidian-prepare-btn",
+                                )
+                            obsidian_status_md = gr.Markdown(
+                                value="",
+                                visible="hidden",
+                                elem_id="obsidian-status-md",
+                            )
+                            obsidian_warning_md = gr.Markdown(
+                                value="",
+                                visible="hidden",
+                                elem_id="obsidian-warning-md",
+                            )
+                            obsidian_faq_preview = gr.Textbox(
+                                label="Distilled Meeting Chat FAQ (Editable)",
+                                value="",
+                                lines=8,
+                                max_lines=16,
+                                visible="hidden",
+                                interactive=True,
+                                placeholder="Distilled Meeting Chat FAQ will appear here when Meeting Chat has conversation turns.",
+                                elem_id="obsidian-faq-preview",
+                            )
+                            with gr.Row():
+                                obsidian_confirm_btn = gr.Button(
+                                    "Confirm & Export to Obsidian",
+                                    variant="primary",
+                                    visible="hidden",
+                                    scale=0,
+                                    elem_id="obsidian-confirm-btn",
+                                )
+                                obsidian_cancel_btn = gr.Button(
+                                    "Cancel",
+                                    variant="secondary",
+                                    visible="hidden",
+                                    scale=0,
+                                    elem_id="obsidian-cancel-btn",
+                                )
+
             self.video_input = video_input
             self.transcript_input = transcript_input
             self.interval_slider = interval_slider
@@ -1400,6 +1921,16 @@ class MeetingNotesApp:
             self.starter_buttons = starter_buttons
             self.send_btn = send_btn
             self.clear_chat_btn = clear_chat_btn
+            self.obsidian_export_accordion = obsidian_export_accordion
+            self.obsidian_vault_input = obsidian_vault_input
+            self.obsidian_browse_btn = obsidian_browse_btn
+            self.obsidian_prefix_input = obsidian_prefix_input
+            self.obsidian_prepare_btn = obsidian_prepare_btn
+            self.obsidian_status_md = obsidian_status_md
+            self.obsidian_warning_md = obsidian_warning_md
+            self.obsidian_faq_preview = obsidian_faq_preview
+            self.obsidian_confirm_btn = obsidian_confirm_btn
+            self.obsidian_cancel_btn = obsidian_cancel_btn
             self.generate_btn = generate_btn
             self.reset_btn = reset_btn
             self.provider_status_chip = provider_status_chip
@@ -1485,14 +2016,27 @@ class MeetingNotesApp:
                     stage_progress_html,
                 ],
             ).then(
-                self._on_generate_finish,
-                inputs=[screenshots_gallery],
-                outputs=[generate_btn, screenshots_tab, results_tabs],
+                self._on_obsidian_after_generate,
+                inputs=[meeting_context_state],
+                outputs=[
+                    obsidian_export_state,
+                    obsidian_prepare_btn,
+                    obsidian_confirm_btn,
+                    obsidian_cancel_btn,
+                    obsidian_faq_preview,
+                    obsidian_warning_md,
+                    obsidian_status_md,
+                ],
                 show_progress="hidden",
             ).then(
                 self._sync_screenshots_tab,
                 inputs=[screenshots_gallery],
                 outputs=[screenshots_tab],
+                show_progress="hidden",
+            ).then(
+                self._on_generate_finish,
+                inputs=[screenshots_gallery],
+                outputs=[generate_btn, screenshots_tab, results_tabs],
                 show_progress="hidden",
             )
 
@@ -1520,6 +2064,64 @@ class MeetingNotesApp:
                 self._on_clear_chat,
                 inputs=[],
                 outputs=[chatbot, chat_input],
+            )
+
+            obsidian_browse_btn.click(
+                self._on_obsidian_browse,
+                inputs=[obsidian_vault_input],
+                outputs=[obsidian_vault_input, obsidian_status_md],
+                show_progress="minimal",
+            )
+            obsidian_prepare_btn.click(
+                self._on_obsidian_prepare,
+                inputs=[
+                    obsidian_vault_input,
+                    obsidian_prefix_input,
+                    meeting_context_state,
+                    chatbot,
+                    base_url_input,
+                    api_key_input,
+                    model_input,
+                    language_dd,
+                    reasoning_effort_input,
+                ],
+                outputs=[
+                    obsidian_export_state,
+                    obsidian_status_md,
+                    obsidian_warning_md,
+                    obsidian_faq_preview,
+                    obsidian_confirm_btn,
+                    obsidian_cancel_btn,
+                ],
+            )
+            obsidian_confirm_btn.click(
+                self._on_obsidian_confirm,
+                inputs=[
+                    obsidian_export_state,
+                    obsidian_prefix_input,
+                    obsidian_faq_preview,
+                ],
+                outputs=[
+                    obsidian_export_state,
+                    obsidian_status_md,
+                    obsidian_warning_md,
+                    obsidian_faq_preview,
+                    obsidian_confirm_btn,
+                    obsidian_cancel_btn,
+                ],
+            )
+            obsidian_cancel_btn.click(
+                self._on_obsidian_cancel,
+                inputs=[],
+                outputs=[
+                    obsidian_export_state,
+                    obsidian_status_md,
+                    obsidian_warning_md,
+                    obsidian_faq_preview,
+                    obsidian_confirm_btn,
+                    obsidian_cancel_btn,
+                ],
+                show_progress="hidden",
             )
 
             video_input.change(
@@ -1565,6 +2167,22 @@ class MeetingNotesApp:
                     results_tabs,
                     interval_slider,
                     max_frames_slider,
+                ],
+                show_progress="hidden",
+            ).then(
+                self._on_obsidian_reset,
+                inputs=[],
+                outputs=[
+                    obsidian_export_state,
+                    obsidian_vault_input,
+                    obsidian_prefix_input,
+                    obsidian_prepare_btn,
+                    obsidian_confirm_btn,
+                    obsidian_cancel_btn,
+                    obsidian_faq_preview,
+                    obsidian_warning_md,
+                    obsidian_status_md,
+                    obsidian_export_accordion,
                 ],
                 show_progress="hidden",
             )
