@@ -741,32 +741,39 @@ _TK_FOLDER_PICKER_SCRIPT = (
 _MACOS_FOLDER_PICKER_SCRIPT = (
     'use framework "AppKit"\n'
     'use framework "Foundation"\n'
-    "use scripting additions\n"
     "on run argv\n"
-    "  set appInst to current application's NSApplication's sharedApplication()\n"
-    "  appInst's setActivationPolicy:(current application's NSApplicationActivationPolicyAccessory)\n"
-    "  set panel to current application's NSOpenPanel's openPanel()\n"
-    '  panel\'s setTitle:"Select Obsidian Vault folder"\n'
-    '  panel\'s setMessage:"Select Obsidian Vault folder"\n'
-    '  panel\'s setPrompt:"Select"\n'
-    "  panel's setCanChooseFiles:false\n"
-    "  panel's setCanChooseDirectories:true\n"
-    "  panel's setCanCreateDirectories:true\n"
-    "  panel's setAllowsMultipleSelection:false\n"
+    "  set appInst to current application's NSApplication's |sharedApplication|()\n"
+    "  appInst's |setActivationPolicy|:(current application's NSApplicationActivationPolicyAccessory)\n"
+    "  set panel to current application's NSOpenPanel's |openPanel|()\n"
+    '  panel\'s |setTitle|:"Select Obsidian Vault folder"\n'
+    '  panel\'s |setMessage|:"Select Obsidian Vault folder"\n'
+    '  panel\'s |setPrompt|:"Select"\n'
+    "  panel's |setCanChooseFiles|:false\n"
+    "  panel's |setCanChooseDirectories|:true\n"
+    "  panel's |setCanCreateDirectories|:true\n"
+    "  panel's |setAllowsMultipleSelection|:false\n"
     "  set behavior to ((current application's NSWindowCollectionBehaviorCanJoinAllSpaces) as integer)"
     " + ((current application's NSWindowCollectionBehaviorFullScreenAuxiliary) as integer)\n"
-    "  panel's setCollectionBehavior:behavior\n"
-    "  panel's setFloatingPanel:true\n"
-    "  panel's setLevel:(current application's NSModalPanelWindowLevel)\n"
+    "  panel's |setCollectionBehavior|:behavior\n"
+    "  panel's |setFloatingPanel|:true\n"
+    "  panel's |setLevel|:(current application's NSModalPanelWindowLevel)\n"
     '  if (count of argv) > 0 and item 1 of argv is not "" then\n'
-    "    set dirURL to current application's NSURL's fileURLWithPath:(item 1 of argv)\n"
-    "    panel's setDirectoryURL:dirURL\n"
+    "    set dirURL to current application's NSURL's |fileURLWithPath|:(item 1 of argv)\n"
+    "    panel's |setDirectoryURL|:dirURL\n"
     "  end if\n"
-    "  appInst's activateIgnoringOtherApps:true\n"
-    "  panel's makeKeyAndOrderFront:(missing value)\n"
-    "  set resp to panel's runModal()\n"
+    '  if (count of argv) > 1 and item 2 of argv is "--dry-run" then\n'
+    "    set probeURL to panel's |URL|()\n"
+    "    set checkURL to panel's |directoryURL|()\n"
+    "    return ((checkURL's |path|()) as text)\n"
+    "  end if\n"
+    "  appInst's |activateIgnoringOtherApps|:true\n"
+    "  panel's |makeKeyAndOrderFront|:(missing value)\n"
+    "  set resp to panel's |runModal|()\n"
     "  if (resp as integer) is 1 then\n"
-    "    set pickedURL to panel's URL()\n"
+    "    set pickedURL to panel's |URL|()\n"
+    "    if pickedURL is missing value then\n"
+    "      error number -128\n"
+    "    end if\n"
     "    return ((pickedURL's |path|()) as text)\n"
     "  else\n"
     "    error number -128\n"

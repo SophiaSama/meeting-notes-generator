@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from unittest.mock import MagicMock
 
 import gradio as gr
@@ -1166,6 +1167,15 @@ class TestObsidianExportUIHandlers:
                 text=True,
             )
             assert comp.returncode == 0, comp.stderr
+        if sys.platform == "darwin" and shutil.which("osascript"):
+            resolved_tmp = str(tmp_path.resolve())
+            dry = subprocess.run(
+                ["osascript", "-e", cmd_mac[2], resolved_tmp, "--dry-run"],
+                capture_output=True,
+                text=True,
+            )
+            assert dry.returncode == 0, dry.stderr
+            assert dry.stdout.strip() == resolved_tmp
 
         # Windows passes initial_dir via env var
         monkeypatch.setattr("meeting_notes.ui.sys.platform", "win32")
