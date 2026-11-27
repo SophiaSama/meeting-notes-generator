@@ -1,6 +1,7 @@
 from meeting_notes.notes import NotesService
 from meeting_notes.themes import (
     DEFAULT_THEME,
+    FONT_IMPORT,
     THEMES,
     build_export_css,
     build_ui_css,
@@ -89,3 +90,49 @@ def test_export_declares_color_scheme_on_root():
     html = NotesService().build_html_notes("x", [], INFO, "m")
     assert '<meta name="color-scheme" content="light dark">' in html
     assert "html { color-scheme: light dark; }" in html
+
+
+# Primary (first-listed) typeface per theme.
+FONT_MAP = {
+    DEFAULT_THEME: "Inter",
+    "ink-wash": "Noto Serif SC",
+    "ukiyo-e": "Shippori Mincho",
+    "rococo": "Playfair Display",
+    "impressionism": "Lora",
+    "ghibli-inspired": "Nunito",
+    "springfield-inspired": "Comic Neue",
+}
+
+
+def _primary_font(font_stack: str) -> str:
+    return font_stack.split(",")[0].strip().strip("\"'")
+
+
+def test_font_map_covers_every_theme():
+    assert set(FONT_MAP) == set(THEMES)
+
+
+def test_each_theme_uses_its_assigned_primary_font():
+    for tid, family in FONT_MAP.items():
+        assert _primary_font(THEMES[tid].font) == family, tid
+
+
+def test_each_theme_has_a_distinct_primary_font():
+    fonts = [_primary_font(t.font) for t in THEMES.values()]
+    assert len(set(fonts)) == len(fonts)
+
+
+def test_web_fonts_are_imported_for_every_theme():
+    for family in FONT_MAP.values():
+        assert family.replace(" ", "+") in FONT_IMPORT, family
+    assert build_ui_css().startswith("@import")
+    assert build_export_css().startswith("@import")
+
+
+def test_fonts_are_wired_into_ui_and_export_css():
+    ui, export = build_ui_css(), build_export_css()
+    for tid in FONT_MAP:
+        font = THEMES[tid].font
+        assert f"--font: {font}" in export, tid
+        if tid != DEFAULT_THEME:  # default keeps Gradio's own styling in the live UI
+            assert f"--font: {font}" in ui, tid

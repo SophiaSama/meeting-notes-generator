@@ -18,6 +18,7 @@ from .themes import (
     RESTORE_THEME_JS,
     build_ui_css,
     theme_choices,
+    to_embedded_html,
 )
 from .video import VideoService
 from .views import (
@@ -68,6 +69,17 @@ html body {
     margin: 0 !important;
 }
 .art-theme-dd { min-width: 240px; flex: 0 0 auto !important; }
+.rendered-notes-html { color: var(--body-text-color); line-height: 1.75; font-size: 1.05rem; }
+.rendered-notes-html h1 { font-size: 1.6rem; font-weight: 700; color: var(--block-title-text-color); }
+.rendered-notes-html h2 { font-size: 1.2rem; font-weight: 700; margin: 1.5rem 0 .4rem; color: var(--block-title-text-color); }
+.rendered-notes-html .meta { font-size: .9rem; color: var(--body-text-color-subdued); margin-bottom: 1rem;
+    padding-bottom: .75rem; border-bottom: 1px solid var(--border-color-primary); }
+.rendered-notes-html blockquote { border-left: 3px solid var(--color-accent); margin: 1rem 0; padding: .5rem 1rem;
+    color: var(--body-text-color-subdued); background: var(--background-fill-secondary); border-radius: var(--block-radius); }
+.rendered-notes-html .screenshot { margin: 1.25rem 0; border: 1px solid var(--border-color-primary);
+    border-radius: var(--block-radius); overflow: hidden; }
+.rendered-notes-html .screenshot img { width: 100%; max-height: 260px; object-fit: cover; display: block; }
+.rendered-notes-html .screenshot figcaption { font-size: .85rem; padding: 6px 12px; color: var(--body-text-color-subdued); }
 .theme-toggle-btn {
     width: fit-content !important;
     flex: 0 0 auto !important;
@@ -1040,7 +1052,7 @@ class MeetingNotesApp:
         return (
             state.thumbnails,
             state.notes_text,
-            state.html_notes,
+            to_embedded_html(state.html_notes),
             state.out_path,
             state.meeting_context,
             [],

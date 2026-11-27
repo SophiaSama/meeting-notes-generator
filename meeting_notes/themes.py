@@ -8,6 +8,7 @@ designed per style (e.g. a moonlit ink wash, a night-forest meadow) rather than
 derived by inverting the light one.
 """
 
+import re
 from dataclasses import dataclass
 
 DEFAULT_THEME = "default"
@@ -41,7 +42,7 @@ class ArtTheme:
     heading_transform: str = "none"
 
 
-_SERIF_CJK = '"Songti SC", "Noto Serif SC", "STKaiti", "Kaiti SC", Georgia, serif'
+_SERIF_CJK = '"Noto Serif SC", "Songti SC", "Noto Serif SC", "STKaiti", "Kaiti SC", Georgia, serif'
 
 THEMES: dict[str, ArtTheme] = {
     t.id: t
@@ -50,7 +51,7 @@ THEMES: dict[str, ArtTheme] = {
             id=DEFAULT_THEME,
             label="Default",
             description="Clean neutral look.",
-            font='system-ui, -apple-system, "Segoe UI", sans-serif',
+            font='"Inter", system-ui, -apple-system, "Segoe UI", sans-serif',
             radius="8px",
             heading_transform="uppercase",
             light=Palette(
@@ -86,7 +87,7 @@ THEMES: dict[str, ArtTheme] = {
             id="ukiyo-e",
             label="Ukiyo-e (Japanese woodblock)",
             description="Indigo, cream and red waves; by night, deep indigo with a gold moon.",
-            font='"Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", Georgia, serif',
+            font='"Shippori Mincho", "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", Georgia, serif',
             radius="3px",
             light=Palette(
                 bg="#f3ead3", surface="#e9dcb9", fg="#14233a", muted="#4a5568",
@@ -109,7 +110,7 @@ THEMES: dict[str, ArtTheme] = {
             id="rococo",
             label="Rococo (French)",
             description="Pastel pink, mint and gilt; by night, midnight plum and gold.",
-            font='"Cormorant Garamond", "Playfair Display", "Palatino Linotype", Georgia, serif',
+            font='"Playfair Display", "Cormorant Garamond", "Palatino Linotype", Georgia, serif',
             radius="18px",
             light=Palette(
                 bg="#fdf3f1", surface="#f8e4e4", fg="#4a3340", muted="#6c5460",
@@ -129,7 +130,7 @@ THEMES: dict[str, ArtTheme] = {
             id="impressionism",
             label="Impressionism",
             description="Dappled lilac, lily green and yellow; by night, a Monet twilight.",
-            font='"Iowan Old Style", "Palatino Linotype", Georgia, serif',
+            font='"Lora", "Iowan Old Style", "Palatino Linotype", Georgia, serif',
             radius="14px",
             light=Palette(
                 bg="#f1f5f9", surface="#e4ecf3", fg="#2b3a4a", muted="#4e6072",
@@ -181,7 +182,7 @@ THEMES: dict[str, ArtTheme] = {
             id="springfield-inspired",
             label="Yellow Cartoon (Simpsons-inspired)",
             description="Bright yellow and sky blue; by night, navy sky with yellow outlines.",
-            font='"Comic Sans MS", "Chalkboard SE", "Marker Felt", system-ui, sans-serif',
+            font='"Comic Neue", "Comic Sans MS", "Chalkboard SE", "Marker Felt", system-ui, sans-serif',
             radius="12px",
             light=Palette(
                 bg="#9fd3f5", surface="#fed41d", fg="#111111", muted="#2d2d2d",
@@ -205,6 +206,15 @@ THEMES: dict[str, ArtTheme] = {
         ),
     ]
 }
+
+
+# Web fonts give every theme a distinct face; system stacks remain the offline fallback.
+FONT_IMPORT = (
+    "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700"
+    "&family=Noto+Serif+SC:wght@500;700&family=Shippori+Mincho:wght@500;700"
+    "&family=Playfair+Display:wght@500;700&family=Lora:wght@500;700"
+    "&family=Nunito:wght@500;700&family=Comic+Neue:wght@400;700&display=swap');\n"
+)
 
 
 def theme_choices() -> list[tuple[str, str]]:
@@ -252,6 +262,11 @@ def _ui_vars(t: ArtTheme, p: Palette) -> str:
   --button-large-radius: {t.radius};
   --button-small-radius: {t.radius};
   --font: {t.font};
+  --text-sm: 15px;
+  --text-md: 17px;
+  --text-lg: 19px;
+  --block-title-text-weight: 600;
+  --block-label-text-weight: 600;
   font-family: {t.font};"""
 
 
@@ -277,13 +292,22 @@ def _ui_block(t: ArtTheme) -> str:
             f"{gc} {{ background-image: {p.image}; background-attachment: fixed; }}"
         )
         heads = ", ".join(f"{scope} {h}" for h in ("h1", "h2", "h3"))
-        out.append(f"{heads} {{ color: {p.heading}; }}")
+        out.append(f"{heads} {{ color: {p.heading}; font-weight: 700; }}")
+        # Thin display faces (Cormorant, Mincho...) read poorly at default weight/size.
+        text = ", ".join(
+            f"{gc} {s}"
+            for s in ("p", "li", "label", "span", "input", "textarea", "button", "select")
+        )
+        out.append(f"{text} {{ font-family: {t.font}; font-weight: 500; }}")
+        out.append(f"{gc} {{ font-size: 17px; line-height: 1.6; }}")
     return "\n".join(out) + "\n"
 
 
 def build_ui_css() -> str:
     """CSS for the live Gradio UI. Themes activate via [data-art-theme] and `.dark`."""
-    return "\n".join(_ui_block(t) for t in THEMES.values() if t.id != DEFAULT_THEME)
+    return FONT_IMPORT + "\n".join(
+        _ui_block(t) for t in THEMES.values() if t.id != DEFAULT_THEME
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -312,7 +336,7 @@ def _export_block(t: ArtTheme) -> str:
 
 def build_export_css() -> str:
     """Self-contained CSS for exported HTML notes (variables + all theme blocks)."""
-    base = """
+    base = FONT_IMPORT + """
     /* color-scheme belongs on the root so canvas, scrollbars and form controls adapt. */
     html { color-scheme: light dark; }
     html:has(body[data-mode="light"]) { color-scheme: light; }
@@ -363,6 +387,22 @@ def build_export_picker_html(selected: str) -> str:
         '<option value="light">Light</option><option value="dark">Dark</option></select>'
         "</div>"
     )
+
+
+def to_embedded_html(doc: str) -> str:
+    """Turn an exported notes document into a fragment safe to drop into the live UI.
+
+    The standalone export carries its own <style> (global ``body``/``h1``/``select``
+    rules), a theme/mode picker and a full document shell. Injected verbatim into a
+    ``gr.HTML`` those leak into the app, so keep only the body content minus the picker;
+    the live theme styles it via ``.rendered-notes-html`` rules.
+    """
+    if not doc or "<body" not in doc:
+        return doc
+    body = re.sub(r"^.*?<body[^>]*>", "", doc, count=1, flags=re.S)
+    body = re.sub(r"</body>.*$", "", body, count=1, flags=re.S)
+    body = re.sub(r'<div class="theme-picker">.*?</select></div>', "", body, count=1, flags=re.S)
+    return body.strip()
 
 
 # Applies a theme id to <body>/<html> and remembers it in localStorage.
